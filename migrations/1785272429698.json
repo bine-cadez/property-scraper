@@ -1,0 +1,858 @@
+{
+  "version": "1",
+  "id": "1785272429698",
+  "diff": {
+    "operations": [
+      {
+        "type": "drop_table",
+        "table": "gurs_address_search_samples"
+      },
+      {
+        "type": "drop_table",
+        "table": "gurs_ev_building_parcels"
+      },
+      {
+        "type": "drop_table",
+        "table": "gurs_ev_building_parts"
+      },
+      {
+        "type": "drop_table",
+        "table": "gurs_ev_buildings"
+      },
+      {
+        "type": "drop_table",
+        "table": "gurs_ev_parcels"
+      },
+      {
+        "type": "drop_table",
+        "table": "gurs_ev_special_units"
+      },
+      {
+        "table": "gurs_etn_building_parts",
+        "column": "parcel_for_geolocation",
+        "type": "drop_column",
+        "attributes": {
+          "type": "text",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_etn_building_parts",
+        "column": "item_price",
+        "type": "drop_column",
+        "attributes": {
+          "type": "numeric",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_etn_building_parts",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_etn_code_lists",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_etn_land",
+        "column": "plantation_type",
+        "type": "drop_column",
+        "attributes": {
+          "type": "integer",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_etn_land",
+        "column": "item_price",
+        "type": "drop_column",
+        "attributes": {
+          "type": "numeric",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_etn_land",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_etn_transactions",
+        "column": "vat_rate",
+        "type": "drop_column",
+        "attributes": {
+          "type": "numeric",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_etn_transactions",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_ev_building_part_units",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_ev_parcel_units",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_addresses",
+        "column": "full_address",
+        "type": "add_column",
+        "attributes": {
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_addresses",
+        "column": "eid_naselje",
+        "type": "drop_column",
+        "attributes": {
+          "type": "text",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_addresses",
+        "column": "eid_ulica",
+        "type": "drop_column",
+        "attributes": {
+          "type": "text",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_addresses",
+        "column": "eid_postni_okolis",
+        "type": "drop_column",
+        "attributes": {
+          "type": "text",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_addresses",
+        "column": "geometry",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_addresses",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parcels",
+        "column": "ko_id",
+        "type": "drop_column",
+        "attributes": {
+          "type": "integer",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parcels",
+        "column": "building_number",
+        "type": "drop_column",
+        "attributes": {
+          "type": "integer",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parcels",
+        "column": "parcel_number",
+        "type": "drop_column",
+        "attributes": {
+          "type": "text",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parcels",
+        "column": "centroid_e",
+        "type": "drop_column",
+        "attributes": {
+          "type": "numeric",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parcels",
+        "column": "centroid_n",
+        "type": "drop_column",
+        "attributes": {
+          "type": "numeric",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parcels",
+        "column": "geometry",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parcels",
+        "column": "source_updated_at",
+        "type": "drop_column",
+        "attributes": {
+          "type": "timestamptz",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parcels",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parts",
+        "column": "apartment_number",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parts",
+        "column": "floor_number",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parts",
+        "column": "floor_label",
+        "type": "add_column",
+        "attributes": {
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parts",
+        "column": "main_entrance_floor",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parts",
+        "column": "position_code",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parts",
+        "column": "position_name",
+        "type": "add_column",
+        "attributes": {
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parts",
+        "column": "elevator_code",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parts",
+        "column": "window_renovation_year",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parts",
+        "column": "installation_renovation_year",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parts",
+        "column": "ev_source_key",
+        "type": "add_column",
+        "attributes": {
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_building_parts",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "facade_renovation_year",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "roof_renovation_year",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "building_type_code",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "building_type_name",
+        "type": "add_column",
+        "attributes": {
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "construction_type_code",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "construction_type_name",
+        "type": "add_column",
+        "attributes": {
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "electricity_code",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "gas_code",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "water_code",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "sewer_code",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "ev_source_key",
+        "type": "add_column",
+        "attributes": {
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "geometry",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": false,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_cadastral_municipalities",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_parcels",
+        "column": "administrative_status_code",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_parcels",
+        "column": "administrative_status_name",
+        "type": "add_column",
+        "attributes": {
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_parcels",
+        "column": "land_rating",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_parcels",
+        "column": "accessibility",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_parcels",
+        "column": "site_coefficient",
+        "type": "add_column",
+        "attributes": {
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_parcels",
+        "column": "ev_source_key",
+        "type": "add_column",
+        "attributes": {
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_parcels",
+        "column": "raw_data",
+        "type": "drop_column",
+        "attributes": {
+          "type": "jsonb",
+          "notNull": true,
+          "primaryKey": false,
+          "unique": false
+        }
+      },
+      {
+        "table": "gurs_kn_parcels",
+        "name": "idx_gurs_kn_parcels_centroid_e_centroid_n",
+        "columns": [
+          "centroid_e",
+          "centroid_n"
+        ],
+        "unique": false,
+        "type": "create_index"
+      },
+      {
+        "table": "gurs_kn_buildings",
+        "name": "idx_gurs_kn_buildings_centroid_e_centroid_n",
+        "columns": [
+          "centroid_e",
+          "centroid_n"
+        ],
+        "unique": false,
+        "type": "create_index"
+      },
+      {
+        "table": "gurs_kn_addresses",
+        "name": "idx_gurs_kn_addresses_municipality_name_settlement_name_street_name",
+        "columns": [
+          "municipality_name",
+          "settlement_name",
+          "street_name"
+        ],
+        "unique": false,
+        "type": "create_index"
+      },
+      {
+        "table": "gurs_kn_addresses",
+        "name": "idx_gurs_kn_addresses_centroid_e_centroid_n",
+        "columns": [
+          "centroid_e",
+          "centroid_n"
+        ],
+        "unique": false,
+        "type": "create_index"
+      },
+      {
+        "table": "gurs_etn_transactions",
+        "name": "idx_gurs_etn_transactions_marketability_contract_date",
+        "columns": [
+          "marketability",
+          "contract_date"
+        ],
+        "unique": false,
+        "type": "create_index"
+      },
+      {
+        "table": "gurs_etn_building_parts",
+        "name": "idx_gurs_etn_building_parts_centroid_e_centroid_n",
+        "columns": [
+          "centroid_e",
+          "centroid_n"
+        ],
+        "unique": false,
+        "type": "create_index"
+      },
+      {
+        "table": "gurs_etn_land",
+        "name": "idx_gurs_etn_land_centroid_e_centroid_n",
+        "columns": [
+          "centroid_e",
+          "centroid_n"
+        ],
+        "unique": false,
+        "type": "create_index"
+      },
+      {
+        "table": "gurs_address_search_samples",
+        "name": "idx_gurs_address_search_samples_eid_stavba",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_address_search_samples",
+        "name": "idx_gurs_address_search_samples_eid_del_stavbe",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_address_search_samples",
+        "name": "idx_gurs_address_search_samples_eid_hisna_stevilka",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_address_search_samples",
+        "name": "idx_gurs_address_search_samples_source_key",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_building_parcels",
+        "name": "idx_gurs_ev_building_parcels_eid_stavba",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_building_parcels",
+        "name": "idx_gurs_ev_building_parcels_eid_parcela",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_building_parcels",
+        "name": "idx_gurs_ev_building_parcels_source_key",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_building_parts",
+        "name": "idx_gurs_ev_building_parts_eid_stavba",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_building_parts",
+        "name": "idx_gurs_ev_building_parts_source_key",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_buildings",
+        "name": "idx_gurs_ev_buildings_ko_id_building_number",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_buildings",
+        "name": "idx_gurs_ev_buildings_source_key",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_parcels",
+        "name": "idx_gurs_ev_parcels_ko_id_parcel_number",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_parcels",
+        "name": "idx_gurs_ev_parcels_source_key",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_special_units",
+        "name": "idx_gurs_ev_special_units_eid_del_stavbe",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_special_units",
+        "name": "idx_gurs_ev_special_units_eid_parcela",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_ev_special_units",
+        "name": "idx_gurs_ev_special_units_source_key",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_kn_addresses",
+        "name": "idx_gurs_kn_addresses_municipality_name_settlement_name_street_",
+        "type": "drop_index"
+      },
+      {
+        "table": "gurs_kn_cadastral_municipalities",
+        "name": "gurs_kn_cadastral_municipalities_eid_katastrska_obcina_primary_key",
+        "columns": [
+          "eid_katastrska_obcina"
+        ],
+        "type": "create_primary_key_constraint"
+      },
+      {
+        "table": "gurs_address_search_samples",
+        "name": "gurs_address_search_samples_sample_key_primary_key",
+        "type": "drop_primary_key_constraint"
+      },
+      {
+        "table": "gurs_ev_building_parcels",
+        "name": "gurs_ev_building_parcels_relationship_id_primary_key",
+        "type": "drop_primary_key_constraint"
+      },
+      {
+        "table": "gurs_ev_building_parts",
+        "name": "gurs_ev_building_parts_eid_del_stavbe_primary_key",
+        "type": "drop_primary_key_constraint"
+      },
+      {
+        "table": "gurs_ev_buildings",
+        "name": "gurs_ev_buildings_eid_stavba_primary_key",
+        "type": "drop_primary_key_constraint"
+      },
+      {
+        "table": "gurs_ev_parcels",
+        "name": "gurs_ev_parcels_eid_parcela_primary_key",
+        "type": "drop_primary_key_constraint"
+      },
+      {
+        "table": "gurs_ev_special_units",
+        "name": "gurs_ev_special_units_record_id_primary_key",
+        "type": "drop_primary_key_constraint"
+      },
+      {
+        "table": "gurs_kn_cadastral_municipalities",
+        "name": "gurs_kn_cadastral_municipalities_eid_katastrska_obcina_primary_",
+        "type": "drop_primary_key_constraint"
+      }
+    ]
+  }
+}

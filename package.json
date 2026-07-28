@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "ingest:gurs": "tsx src/gurs/ingest.ts",
     "migrate:generate": "node node_modules/@izumisy/kyrage/dist/main.mjs generate",
     "migrate:plan": "node node_modules/@izumisy/kyrage/dist/main.mjs apply --plan",
     "migrate:apply": "node node_modules/@izumisy/kyrage/dist/main.mjs apply"
