@@ -1,0 +1,37 @@
+{
+  "name": "property-scraper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Property scraping API built with Fastify and TypeScript",
+  "type": "module",
+  "packageManager": "pnpm@10.20.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "migrate:generate": "node node_modules/@izumisy/kyrage/dist/main.mjs generate",
+    "migrate:plan": "node node_modules/@izumisy/kyrage/dist/main.mjs apply --plan",
+    "migrate:apply": "node node_modules/@izumisy/kyrage/dist/main.mjs apply"
+  },
+  "dependencies": {
+    "axios": "^1.18.1",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.10.0",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@izumisy/kyrage": "^1.6.0",
+    "@types/node": "^26.1.2",
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
