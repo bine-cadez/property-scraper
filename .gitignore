@@ -4,4 +4,7 @@ coverage
 .env
 .DS_Store
 *.log
-
+*.dump
+*.dump/
+*.sql.gz
+property_scraper.dump

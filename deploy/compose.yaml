@@ -1,0 +1,66 @@
+services:
+  api:
+    image: ${IMAGE_REF:?IMAGE_REF must be set}
+    env_file:
+      - .env
+    restart: unless-stopped
+    expose:
+      - "3000"
+    networks:
+      - application
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          const http=require('node:http');const request=http.get({host:'127.0.0.1',port:process.env.PORT||3000,path:'/ready',headers:{'x-api-key':process.env.AUTH_KEY}},response=>{response.resume();process.exit(response.statusCode===200?0:1)});request.on('error',()=>process.exit(1));request.setTimeout(5000,()=>{request.destroy();process.exit(1)})
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 20s
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - application
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  application:
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -4,4 +4,6 @@ coverage
 .git
 .env
 *.log
-
+*.dump
+*.dump/
+*.sql.gz

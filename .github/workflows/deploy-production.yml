@@ -1,0 +1,155 @@
+name: Deploy production
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.20.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_ref: ${{ steps.image.outputs.ref }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Define immutable image reference
+        id: image
+        shell: bash
+        run: |
+          repository="${GITHUB_REPOSITORY,,}"
+          echo "ref=ghcr.io/${repository}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "latest=ghcr.io/${repository}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: production
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.ref }}
+            ${{ steps.image.outputs.latest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure deployment SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.HETZNER_VM_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.HETZNER_VM_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/hetzner_deploy"
+          chmod 600 "$HOME/.ssh/hetzner_deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/hetzner_deploy" >/dev/null
+
+      - name: Copy deployment configuration
+        env:
+          DEPLOY_HOST: ${{ secrets.HETZNER_VM_HOST }}
+          DEPLOY_USER: ${{ secrets.HETZNER_VM_USER }}
+        run: |
+          scp -i "$HOME/.ssh/hetzner_deploy" \
+            deploy/compose.yaml \
+            deploy/Caddyfile \
+            deploy/deploy.sh \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:/opt/property-scraper/"
+
+      - name: Log VM in to GitHub Container Registry
+        env:
+          DEPLOY_HOST: ${{ secrets.HETZNER_VM_HOST }}
+          DEPLOY_USER: ${{ secrets.HETZNER_VM_USER }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | ssh -T -i "$HOME/.ssh/hetzner_deploy" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "docker login ghcr.io --username '${GITHUB_ACTOR}' --password-stdin"
+
+      - name: Deploy and verify readiness
+        env:
+          DEPLOY_HOST: ${{ secrets.HETZNER_VM_HOST }}
+          DEPLOY_USER: ${{ secrets.HETZNER_VM_USER }}
+          IMAGE_REF: ${{ needs.publish.outputs.image_ref }}
+        run: |
+          ssh -T -i "$HOME/.ssh/hetzner_deploy" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "cd /opt/property-scraper && IMAGE_REF='${IMAGE_REF}' sh ./deploy.sh"
+
+      - name: Remove temporary registry credentials from VM
+        if: always()
+        env:
+          DEPLOY_HOST: ${{ secrets.HETZNER_VM_HOST }}
+          DEPLOY_USER: ${{ secrets.HETZNER_VM_USER }}
+        run: |
+          ssh -T -i "$HOME/.ssh/hetzner_deploy" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "docker logout ghcr.io" || true

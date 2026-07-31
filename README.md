@@ -1,3 +1,6 @@
+Production deployment on Hetzner, including GitHub auto-deploy, rollback, and
+Aiven configuration, is documented in [DEPLOYMENT.md](./DEPLOYMENT.md).
+
 ## Local development
 
 Node.js 24 or newer is required (including for the Kyrage migration CLI).
