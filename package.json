@@ -6,7 +6,7 @@
   "type": "module",
   "packageManager": "pnpm@10.20.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
@@ -15,12 +15,15 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "ingest:gurs": "tsx src/gurs/ingest.ts",
+    "ingest:gurs": "tsx src/gurs/cli.ts",
     "migrate:generate": "node node_modules/@izumisy/kyrage/dist/main.mjs generate",
     "migrate:plan": "node node_modules/@izumisy/kyrage/dist/main.mjs apply --plan",
-    "migrate:apply": "node node_modules/@izumisy/kyrage/dist/main.mjs apply"
+    "migrate:apply": "node node_modules/@izumisy/kyrage/dist/main.mjs apply && tsx src/db/migrate.ts",
+    "migrate:sql": "tsx src/db/migrate.ts"
   },
   "dependencies": {
+    "@fastify/swagger": "^9.8.1",
+    "@fastify/swagger-ui": "^6.1.1",
     "axios": "^1.18.1",
     "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",

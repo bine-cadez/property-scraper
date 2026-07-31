@@ -1,11 +1,11 @@
+import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import type { Pool } from "pg";
 
-import { loadConfig } from "../config.js";
-import { createDatabase } from "../db/client.js";
 import { parseCsv, type CsvRecord } from "./csv.js";
+import { refreshMapTables } from "./map-refresh.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -21,23 +21,55 @@ type FeatureCollection = {
   numberReturned?: number;
 };
 
-type ImportSummary = {
+export type ImportSummary = {
   source: string;
   rows: number;
+  skippedRows?: number;
+  skipReason?: string;
+};
+
+export type IngestProgress = {
+  phase: "anchor" | "fetch" | "resolve" | "write" | "replace" | "complete";
+  source: string;
+  message: string;
+  details: JsonObject;
 };
 
 type Queryable = {
   query(text: string, values?: unknown[]): Promise<unknown>;
 };
 
+type FetchCache = {
+  database: Queryable;
+  runKey: string;
+};
+
+type FetchResult<T> = {
+  data: T;
+  cached: boolean;
+};
+
+type SqlValueType = "integer" | "numeric" | "text";
+export type ProgressReporter = (progress: IngestProgress) => void;
+
+export const DEFAULT_LIVE_SAMPLE_SIZE = 2;
+export const MAX_LIVE_SAMPLE_SIZE = 10_000;
+export const DEFAULT_TRANSACTION_YEAR = 2025;
+
+const FETCH_BATCH_SIZE = 1_000;
+const CQL_BATCH_SIZE = 40;
+const WRITE_BATCH_SIZE = 200;
+const FETCH_MAX_ATTEMPTS = 7;
+const FETCH_RETRY_BASE_DELAY_MS = 1_000;
+const FETCH_RETRY_MAX_DELAY_MS = 30_000;
 const RETRIEVAL_DATE = new Date().toISOString().slice(0, 10);
 const LICENCE = "CC BY 4.0";
 const KN_BASE =
   "https://ipi.eprostor.gov.si/wfs-si-gurs-kn/ogc/features/collections";
 const EV_BASE =
   "https://ipi.eprostor.gov.si/wfs-si-gurs-ev/ogc/features/collections";
-const ADDRESS_BASE =
-  "https://ipi.eprostor.gov.si/search-api/v1/external/iskanje/naslovi/";
+const FETCH_TIMEOUT_MS = 5 * 60_000;
+const FETCH_CACHE_MAX_AGE = "7 days";
 
 const KN_COLLECTIONS = [
   "PARCELE",
@@ -55,6 +87,90 @@ const EV_COLLECTIONS = [
   "DEL_STAVBE",
   "DEL_STAVBE_ENOTA",
 ] as const;
+
+const LIVE_DATA_TABLES = [
+  "gurs_ev_building_part_units",
+  "gurs_ev_parcel_units",
+  "gurs_kn_addresses",
+  "gurs_kn_cadastral_municipalities",
+  "gurs_kn_building_parcels",
+  "gurs_kn_building_parts",
+  "gurs_kn_buildings",
+  "gurs_kn_parcels",
+] as const;
+
+export function validateLiveSampleSize(value: unknown): number {
+  const sampleSize =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : Number.NaN;
+
+  if (
+    !Number.isInteger(sampleSize) ||
+    sampleSize < 1 ||
+    sampleSize > MAX_LIVE_SAMPLE_SIZE
+  ) {
+    throw new Error(
+      `sampleSize must be an integer between 1 and ${MAX_LIVE_SAMPLE_SIZE}`,
+    );
+  }
+
+  return sampleSize;
+}
+
+export function validateTransactionYear(value: unknown): number {
+  const year =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : Number.NaN;
+
+  if (!Number.isInteger(year) || year < 2007 || year > 2100) {
+    throw new Error("transactionYear must be an integer between 2007 and 2100");
+  }
+
+  return year;
+}
+
+function addSummary(
+  summaries: ImportSummary[],
+  summary: ImportSummary,
+  report?: ProgressReporter,
+): void {
+  summaries.push(summary);
+  report?.({
+    phase: "complete",
+    source: summary.source,
+    message: `Completed ${summary.source}`,
+    details: {
+      rows: summary.rows,
+      skippedRows: summary.skippedRows ?? 0,
+      skipReason: summary.skipReason ?? null,
+    },
+  });
+}
+
+function filterRequiredRows<T extends JsonObject>(
+  rows: T[],
+  requiredColumns: Array<keyof T>,
+): { validRows: T[]; skippedRows: number } {
+  const validRows = rows.filter((row) =>
+    requiredColumns.every(
+      (column) =>
+        row[column] !== null &&
+        row[column] !== undefined &&
+        row[column] !== "",
+    ),
+  );
+
+  return {
+    validRows,
+    skippedRows: rows.length - validRows.length,
+  };
+}
 
 function text(value: unknown): string | null {
   if (value === undefined || value === null || value === "") {
@@ -102,31 +218,846 @@ function attribution(dataset: string): string {
   return `Geodetska uprava Republike Slovenije, ${dataset}, ${RETRIEVAL_DATE}`;
 }
 
-async function fetchJson<T>(url: URL | string): Promise<T> {
-  const response = await fetch(url, {
-    headers: {
-      accept: "application/json, application/geo+json",
-      "user-agent": "property-scraper GURS source validator",
-    },
-    signal: AbortSignal.timeout(60_000),
-  });
+class FetchHttpError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+  }
+}
 
-  if (!response.ok) {
-    throw new Error(
-      `${response.status} ${response.statusText} returned by ${response.url}`,
-    );
+function requestHash(url: string): string {
+  return createHash("sha256").update(url).digest("hex");
+}
+
+function retryAfterMilliseconds(response: Response): number | undefined {
+  const value = response.headers.get("retry-after");
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
+function retryDelay(attempt: number, requestedDelay?: number): number {
+  return Math.min(
+    requestedDelay ?? FETCH_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
+    FETCH_RETRY_MAX_DELAY_MS,
+  );
+}
+
+async function wait(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function cachedResponse<T>(
+  cache: FetchCache,
+  url: string,
+): Promise<T | undefined> {
+  const result = (await cache.database.query(
+    `
+      SELECT response
+      FROM public.gurs_ingest_fetch_cache
+      WHERE run_key = $1 AND request_hash = $2
+    `,
+    [cache.runKey, requestHash(url)],
+  )) as { rows?: Array<{ response: T }> };
+  return result.rows?.[0]?.response;
+}
+
+async function cacheResponse<T>(
+  cache: FetchCache,
+  url: string,
+  data: T,
+): Promise<void> {
+  await cache.database.query(
+    `
+      INSERT INTO public.gurs_ingest_fetch_cache (
+        run_key, request_hash, request_url, response
+      )
+      VALUES ($1, $2, $3, $4::jsonb)
+      ON CONFLICT (run_key, request_hash) DO UPDATE SET
+        request_url = EXCLUDED.request_url,
+        response = EXCLUDED.response,
+        fetched_at = CURRENT_TIMESTAMP
+    `,
+    [cache.runKey, requestHash(url), url, JSON.stringify(data)],
+  );
+}
+
+async function fetchJson<T>(
+  input: URL | string,
+  cache?: FetchCache,
+  report?: ProgressReporter,
+): Promise<FetchResult<T>> {
+  const url = String(input);
+  if (cache) {
+    const data = await cachedResponse<T>(cache, url);
+    if (data !== undefined) return { data, cached: true };
   }
 
-  return (await response.json()) as T;
+  for (let attempt = 1; attempt <= FETCH_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          accept: "application/json, application/geo+json",
+          "user-agent": "property-scraper GURS source validator",
+        },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        const responseBody = (await response.text()).trim().slice(0, 1_000);
+        throw new FetchHttpError(
+          [
+            `${response.status} ${response.statusText} returned by ${response.url}`,
+            responseBody,
+          ]
+            .filter(Boolean)
+            .join(": "),
+          response.status === 408 ||
+            response.status === 425 ||
+            response.status === 429 ||
+            response.status >= 500,
+          retryAfterMilliseconds(response),
+        );
+      }
+
+      const data = (await response.json()) as T;
+      if (cache) await cacheResponse(cache, url, data);
+      return { data, cached: false };
+    } catch (error) {
+      const canRetry =
+        !(error instanceof FetchHttpError) || error.retryable;
+      if (!canRetry || attempt === FETCH_MAX_ATTEMPTS) throw error;
+
+      const delayMs = retryDelay(
+        attempt,
+        error instanceof FetchHttpError ? error.retryAfterMs : undefined,
+      );
+      report?.({
+        phase: "fetch",
+        source: new URL(url).pathname.split("/").at(-2) ?? "GURS",
+        message: `Fetch failed; retrying request ${attempt + 1}/${FETCH_MAX_ATTEMPTS}`,
+        details: {
+          attempt,
+          nextAttempt: attempt + 1,
+          delayMs,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      await wait(delayMs);
+    }
+  }
+
+  throw new Error("Unreachable fetch retry state");
 }
 
 async function fetchCollection(
   baseUrl: string,
   collection: string,
+  sampleSize: number,
+  report?: ProgressReporter,
+  cache?: FetchCache,
 ): Promise<FeatureCollection> {
-  const url = new URL(`${baseUrl}/${collection}/items`);
-  url.searchParams.set("limit", "2");
-  return fetchJson<FeatureCollection>(url);
+  const features: GeoJsonFeature[] = [];
+  let numberMatched: number | undefined;
+  let batch = 0;
+
+  while (
+    features.length < sampleSize &&
+    (numberMatched === undefined || features.length < numberMatched)
+  ) {
+    const limit = Math.min(FETCH_BATCH_SIZE, sampleSize - features.length);
+    const url = new URL(`${baseUrl}/${collection}/items`);
+    url.searchParams.set("limit", String(limit));
+    url.searchParams.set("startIndex", String(features.length));
+
+    const result = await fetchJson<FeatureCollection>(url, cache, report);
+    const data = result.data;
+    numberMatched = data.numberMatched ?? numberMatched;
+    features.push(...data.features);
+    batch += 1;
+
+    report?.({
+      phase: "fetch",
+      source: collection,
+      message: result.cached
+        ? `Reused checkpointed batch ${batch} for ${collection}`
+        : `Fetched batch ${batch} for ${collection}`,
+      details: {
+        batch,
+        batchRows: data.features.length,
+        fetchedRows: features.length,
+        requestedRows: sampleSize,
+        numberMatched: numberMatched ?? null,
+        cacheHit: result.cached,
+      },
+    });
+
+    if (data.features.length < limit) {
+      break;
+    }
+  }
+
+  return {
+    features,
+    numberReturned: features.length,
+    ...(numberMatched === undefined ? {} : { numberMatched }),
+  };
+}
+
+type CqlScalar = string | number;
+type CqlRow = Record<string, CqlScalar>;
+
+function cqlValue(value: CqlScalar): string {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error("CQL numeric values must be finite");
+    }
+    return String(value);
+  }
+
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+/**
+ * Builds bounded, caller-independent CQL predicates. Field names are supplied
+ * by the importer, never by API callers.
+ */
+export function buildCqlPredicateBatches(
+  rows: CqlRow[],
+  fields: string[],
+  batchSize = CQL_BATCH_SIZE,
+): string[] {
+  if (
+    fields.length === 0 ||
+    fields.some((field) => !/^[A-Z][A-Z0-9_]*$/.test(field))
+  ) {
+    throw new Error("Unsafe or empty CQL field list");
+  }
+  if (!Number.isInteger(batchSize) || batchSize < 1) {
+    throw new Error("CQL batch size must be a positive integer");
+  }
+
+  const uniqueRows = [
+    ...new Map(
+      rows.map((row) => [
+        fields.map((field) => String(row[field])).join("\u0000"),
+        row,
+      ]),
+    ).values(),
+  ];
+  const predicates: string[] = [];
+
+  for (let offset = 0; offset < uniqueRows.length; offset += batchSize) {
+    const batch = uniqueRows.slice(offset, offset + batchSize);
+    predicates.push(
+      batch
+        .map((row) => {
+          const terms = fields.map((field) => {
+            const value = row[field];
+            if (value === undefined) {
+              throw new Error(`Missing CQL value for ${field}`);
+            }
+            return `${field} = ${cqlValue(value)}`;
+          });
+          return `(${terms.join(" AND ")})`;
+        })
+        .join(" OR "),
+    );
+  }
+
+  return predicates;
+}
+
+function featureIdentity(feature: GeoJsonFeature): string {
+  if (feature.id) return feature.id;
+
+  const properties = feature.properties;
+  const naturalId =
+    properties.EID_DEL_STAVBE ??
+    properties.EID_STAVBA_PARCELA ??
+    properties.EID_HISNA_STEVILKA ??
+    properties.EID_KATASTRSKA_OBCINA ??
+    properties.EID_STAVBA ??
+    properties.EID_PARCELA ??
+    properties.ID_PARC_ENOTA;
+  if (naturalId !== undefined && naturalId !== null) {
+    const model = properties.ID_MODEL ?? "";
+    return `${String(naturalId)}:${String(model)}`;
+  }
+  return JSON.stringify(properties);
+}
+
+async function fetchCollectionPredicates(
+  baseUrl: string,
+  collection: string,
+  predicates: string[],
+  report?: ProgressReporter,
+  cache?: FetchCache,
+): Promise<FeatureCollection> {
+  const deduplicated = new Map<string, GeoJsonFeature>();
+  let totalMatched = 0;
+
+  for (const [predicateIndex, predicate] of predicates.entries()) {
+    let startIndex = 0;
+    let numberMatched: number | undefined;
+    let page = 0;
+
+    do {
+      const url = new URL(`${baseUrl}/${collection}/items`);
+      url.searchParams.set("limit", String(FETCH_BATCH_SIZE));
+      url.searchParams.set("startIndex", String(startIndex));
+      url.searchParams.set("filter-lang", "cql-text");
+      url.searchParams.set("filter", predicate);
+      const result = await fetchJson<FeatureCollection>(url, cache, report);
+      const data = result.data;
+      numberMatched = data.numberMatched ?? numberMatched;
+      totalMatched += page === 0 ? (numberMatched ?? data.features.length) : 0;
+      for (const feature of data.features) {
+        deduplicated.set(featureIdentity(feature), feature);
+      }
+      startIndex += data.features.length;
+      page += 1;
+
+      report?.({
+        phase: "fetch",
+        source: collection,
+        message: result.cached
+          ? `Reused checkpoint for CQL request ${predicateIndex + 1}/${predicates.length}, page ${page}`
+          : `Fetched CQL request ${predicateIndex + 1}/${predicates.length}, page ${page}`,
+        details: {
+          requestBatch: predicateIndex + 1,
+          requestBatches: predicates.length,
+          page,
+          batchRows: data.features.length,
+          deduplicatedRows: deduplicated.size,
+          numberMatched: numberMatched ?? null,
+          cacheHit: result.cached,
+        },
+      });
+
+      if (data.features.length === 0) break;
+    } while (
+      numberMatched === undefined
+        ? startIndex % FETCH_BATCH_SIZE === 0
+        : startIndex < numberMatched
+    );
+  }
+
+  return {
+    features: [...deduplicated.values()],
+    numberMatched: totalMatched,
+    numberReturned: deduplicated.size,
+  };
+}
+
+function predicatesForIds(field: string, ids: CqlScalar[]): string[] {
+  return buildCqlPredicateBatches(
+    ids.map((id) => ({ [field]: id })),
+    [field],
+  );
+}
+
+function combineCollections(
+  ...collections: FeatureCollection[]
+): FeatureCollection {
+  const features = new Map<string, GeoJsonFeature>();
+  for (const collection of collections) {
+    for (const feature of collection.features) {
+      features.set(featureIdentity(feature), feature);
+    }
+  }
+  return {
+    features: [...features.values()],
+    numberReturned: features.size,
+    numberMatched: features.size,
+  };
+}
+
+type AnchorTransaction = {
+  id_posla: string;
+  contract_date: string | null;
+};
+
+type AnchorBuildingPart = {
+  record_key: string;
+  id_posla: string;
+  ko_id: number | null;
+  building_number: number | null;
+  part_number: number | null;
+};
+
+type AnchorLand = {
+  record_key: string;
+  id_posla: string;
+  ko_id: number | null;
+  parcel_number: string | null;
+};
+
+type AnchorSet = {
+  transactions: AnchorTransaction[];
+  buildingParts: AnchorBuildingPart[];
+  land: AnchorLand[];
+};
+
+type QueryRows<T> = { rows: T[] };
+
+function fetchCacheRunKey(
+  anchors: AnchorSet,
+  sampleSize: number,
+  transactionYear: number,
+): string {
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        sampleSize,
+        transactionYear,
+        transactions: anchors.transactions,
+        buildingParts: anchors.buildingParts,
+        land: anchors.land,
+      }),
+    )
+    .digest("hex");
+  return `v1:${fingerprint}`;
+}
+
+async function prepareFetchCache(
+  database: Queryable,
+  anchors: AnchorSet,
+  sampleSize: number,
+  transactionYear: number,
+  report?: ProgressReporter,
+): Promise<FetchCache> {
+  await database.query(`
+    CREATE TABLE IF NOT EXISTS public.gurs_ingest_fetch_cache (
+      run_key text NOT NULL,
+      request_hash text NOT NULL,
+      request_url text NOT NULL,
+      response jsonb NOT NULL,
+      fetched_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (run_key, request_hash)
+    )
+  `);
+  await database.query(`
+    CREATE INDEX IF NOT EXISTS gurs_ingest_fetch_cache_fetched_at_idx
+    ON public.gurs_ingest_fetch_cache (fetched_at)
+  `);
+  await database.query(
+    `
+      DELETE FROM public.gurs_ingest_fetch_cache
+      WHERE fetched_at < CURRENT_TIMESTAMP - $1::interval
+    `,
+    [FETCH_CACHE_MAX_AGE],
+  );
+
+  const runKey = fetchCacheRunKey(anchors, sampleSize, transactionYear);
+  const existing = (await database.query(
+    `
+      SELECT count(*)::int AS count
+      FROM public.gurs_ingest_fetch_cache
+      WHERE run_key = $1
+    `,
+    [runKey],
+  )) as { rows?: Array<{ count: number }> };
+  report?.({
+    phase: "fetch",
+    source: "checkpoint cache",
+    message: "Prepared persistent fetch checkpoints",
+    details: {
+      reusableResponses: Number(existing.rows?.[0]?.count ?? 0),
+      retention: FETCH_CACHE_MAX_AGE,
+    },
+  });
+  return { database, runKey };
+}
+
+async function clearFetchCache(
+  database: Queryable,
+  cache: FetchCache,
+): Promise<void> {
+  await database.query(
+    "DELETE FROM public.gurs_ingest_fetch_cache WHERE run_key = $1",
+    [cache.runKey],
+  );
+}
+
+async function loadAnchorSet(
+  pool: Pool,
+  sampleSize: number,
+  transactionYear: number,
+  report?: ProgressReporter,
+): Promise<AnchorSet | null> {
+  // Some unit-test query doubles only implement connect(). Retain a narrow
+  // fallback for those doubles; real pg.Pool instances always expose query().
+  if (typeof pool.query !== "function") {
+    return null;
+  }
+
+  const transactionResult = (await pool.query(
+    `
+      SELECT id_posla::text, contract_date::text
+      FROM gurs_etn_transactions
+      WHERE year = $1
+      ORDER BY contract_date DESC NULLS LAST, id_posla DESC
+      LIMIT $2
+    `,
+    [transactionYear, sampleSize],
+  )) as QueryRows<AnchorTransaction>;
+  const transactions = transactionResult.rows ?? [];
+
+  if (transactions.length === 0) {
+    throw new Error(
+      `No ETN transactions found for transaction year ${transactionYear}`,
+    );
+  }
+
+  const transactionIds = transactions.map(({ id_posla }) => id_posla);
+  const [buildingPartResult, landResult] = (await Promise.all([
+    pool.query(
+      `
+        SELECT
+          record_key, id_posla::text, ko_id, building_number, part_number
+        FROM gurs_etn_building_parts
+        WHERE id_posla = ANY($1::bigint[])
+        ORDER BY id_posla DESC, record_key
+      `,
+      [transactionIds],
+    ),
+    pool.query(
+      `
+        SELECT record_key, id_posla::text, ko_id, parcel_number
+        FROM gurs_etn_land
+        WHERE id_posla = ANY($1::bigint[])
+        ORDER BY id_posla DESC, record_key
+      `,
+      [transactionIds],
+    ),
+  ])) as [QueryRows<AnchorBuildingPart>, QueryRows<AnchorLand>];
+
+  const anchors = {
+    transactions,
+    buildingParts: buildingPartResult.rows ?? [],
+    land: landResult.rows ?? [],
+  };
+  report?.({
+    phase: "anchor",
+    source: "ETN",
+    message: `Selected ${transactions.length} ETN transaction anchors`,
+    details: {
+      transactionYear,
+      requestedTransactions: sampleSize,
+      transactions: transactions.length,
+      buildingPartItems: anchors.buildingParts.length,
+      landItems: anchors.land.length,
+    },
+  });
+  return anchors;
+}
+
+function stringValues(
+  features: GeoJsonFeature[],
+  property: string,
+): string[] {
+  return [
+    ...new Set(
+      features
+        .map(({ properties }) => text(properties[property]))
+        .filter((value): value is string => value !== null),
+    ),
+  ];
+}
+
+type Coverage = {
+  anchorTransactions: number;
+  buildingPartItems: number;
+  resolvedBuildingPartItems: number;
+  unresolvedBuildingPartItems: string[];
+  landItems: number;
+  resolvedLandItems: number;
+  unresolvedLandItems: string[];
+};
+
+async function fetchCoherentGraph(
+  anchors: AnchorSet,
+  report?: ProgressReporter,
+  cache?: FetchCache,
+): Promise<{
+  knResults: Map<string, FeatureCollection>;
+  evResults: Map<string, FeatureCollection>;
+  coverage: Coverage;
+}> {
+  const partKeys = anchors.buildingParts
+    .filter(
+      (item) =>
+        item.ko_id !== null &&
+        item.building_number !== null &&
+        item.part_number !== null,
+    )
+    .map((item) => ({
+      KO_ID: item.ko_id!,
+      ST_STAVBE: item.building_number!,
+      ST_DELA_STAVBE: item.part_number!,
+    }));
+  const parcelKeys = anchors.land
+    .filter((item) => item.ko_id !== null && item.parcel_number !== null)
+    .map((item) => ({
+      KO_ID: item.ko_id!,
+      ST_PARCELE: item.parcel_number!,
+    }));
+
+  const [soldParts, soldParcels] = await Promise.all([
+    fetchCollectionPredicates(
+      KN_BASE,
+      "DELI_STAVB",
+      buildCqlPredicateBatches(partKeys, [
+        "KO_ID",
+        "ST_STAVBE",
+        "ST_DELA_STAVBE",
+      ]),
+      report,
+      cache,
+    ),
+    fetchCollectionPredicates(
+      KN_BASE,
+      "PARCELE",
+      buildCqlPredicateBatches(parcelKeys, ["KO_ID", "ST_PARCELE"]),
+      report,
+      cache,
+    ),
+  ]);
+
+  const soldPartNaturalKeys = new Set(
+    soldParts.features.map(({ properties: p }) =>
+      [p.KO_ID, p.ST_STAVBE, p.ST_DELA_STAVBE].map(String).join(":"),
+    ),
+  );
+  const soldParcelNaturalKeys = new Set(
+    soldParcels.features.map(({ properties: p }) =>
+      [p.KO_ID, p.ST_PARCELE].map(String).join(":"),
+    ),
+  );
+  const unresolvedBuildingPartItems = anchors.buildingParts
+    .filter(
+      (item) =>
+        item.ko_id === null ||
+        item.building_number === null ||
+        item.part_number === null ||
+        !soldPartNaturalKeys.has(
+          `${item.ko_id}:${item.building_number}:${item.part_number}`,
+        ),
+    )
+    .map(({ record_key }) => record_key);
+  const unresolvedLandItems = anchors.land
+    .filter(
+      (item) =>
+        item.ko_id === null ||
+        item.parcel_number === null ||
+        !soldParcelNaturalKeys.has(`${item.ko_id}:${item.parcel_number}`),
+    )
+    .map(({ record_key }) => record_key);
+
+  const soldParcelIds = stringValues(soldParcels.features, "EID_PARCELA");
+  const landBuildingRelationships =
+    soldParcelIds.length === 0
+      ? { features: [] }
+      : await fetchCollectionPredicates(
+          KN_BASE,
+          "STAVBE_PARCELE",
+          predicatesForIds("EID_PARCELA", soldParcelIds),
+          report,
+          cache,
+        );
+  const buildingIds = [
+    ...new Set([
+      ...stringValues(soldParts.features, "EID_STAVBA"),
+      ...stringValues(landBuildingRelationships.features, "EID_STAVBA"),
+    ]),
+  ];
+
+  const [buildings, allParts, addresses, buildingRelationships] =
+    buildingIds.length === 0
+      ? [
+          { features: [] },
+          { features: [] },
+          { features: [] },
+          { features: [] },
+        ]
+      : await Promise.all([
+          fetchCollectionPredicates(
+            KN_BASE,
+            "STAVBE",
+            predicatesForIds("EID_STAVBA", buildingIds),
+            report,
+            cache,
+          ),
+          fetchCollectionPredicates(
+            KN_BASE,
+            "DELI_STAVB",
+            predicatesForIds("EID_STAVBA", buildingIds),
+            report,
+            cache,
+          ),
+          fetchCollectionPredicates(
+            KN_BASE,
+            "NASLOVI_HS",
+            predicatesForIds("EID_STAVBA", buildingIds),
+            report,
+            cache,
+          ),
+          fetchCollectionPredicates(
+            KN_BASE,
+            "STAVBE_PARCELE",
+            predicatesForIds("EID_STAVBA", buildingIds),
+            report,
+            cache,
+          ),
+        ]);
+  const relationships = combineCollections(
+    landBuildingRelationships,
+    buildingRelationships,
+  );
+  const parcelIds = [
+    ...new Set([
+      ...soldParcelIds,
+      ...stringValues(relationships.features, "EID_PARCELA"),
+    ]),
+  ];
+  const relatedParcels =
+    parcelIds.length === 0
+      ? { features: [] }
+      : await fetchCollectionPredicates(
+          KN_BASE,
+          "PARCELE",
+          predicatesForIds("EID_PARCELA", parcelIds),
+          report,
+          cache,
+        );
+  const parcels = combineCollections(soldParcels, relatedParcels);
+  const parts = combineCollections(soldParts, allParts);
+  const municipalityIds = [
+    ...new Set(
+      [...buildings.features, ...parts.features, ...parcels.features]
+        .map(({ properties }) => integer(properties.KO_ID))
+        .filter((value): value is number => value !== null),
+    ),
+  ];
+  const municipalities =
+    municipalityIds.length === 0
+      ? { features: [] }
+      : await fetchCollectionPredicates(
+          KN_BASE,
+          "KATASTRSKE_OBCINE",
+          predicatesForIds("KO_ID", municipalityIds),
+          report,
+          cache,
+        );
+  const resolvedBuildingIds = stringValues(buildings.features, "EID_STAVBA");
+  const resolvedPartIds = stringValues(parts.features, "EID_DEL_STAVBE");
+  const resolvedParcelIds = stringValues(parcels.features, "EID_PARCELA");
+
+  const empty = (): FeatureCollection => ({ features: [] });
+  const [
+    evParcels,
+    evParcelUnits,
+    evBuildings,
+    evParts,
+    evPartUnits,
+  ] = await Promise.all([
+    resolvedParcelIds.length
+      ? fetchCollectionPredicates(
+          EV_BASE,
+          "PARCELA",
+          predicatesForIds("EID_PARCELA", resolvedParcelIds),
+          report,
+          cache,
+        )
+      : empty(),
+    resolvedParcelIds.length
+      ? fetchCollectionPredicates(
+          EV_BASE,
+          "PARC_ENOTA",
+          predicatesForIds("EID_PARCELA", resolvedParcelIds),
+          report,
+          cache,
+        )
+      : empty(),
+    resolvedBuildingIds.length
+      ? fetchCollectionPredicates(
+          EV_BASE,
+          "STAVBA",
+          predicatesForIds("EID_STAVBA", resolvedBuildingIds),
+          report,
+          cache,
+        )
+      : empty(),
+    resolvedPartIds.length
+      ? fetchCollectionPredicates(
+          EV_BASE,
+          "DEL_STAVBE",
+          predicatesForIds("EID_DEL_STAVBE", resolvedPartIds),
+          report,
+          cache,
+        )
+      : empty(),
+    resolvedPartIds.length
+      ? fetchCollectionPredicates(
+          EV_BASE,
+          "DEL_STAVBE_ENOTA",
+          predicatesForIds("EID_DEL_STAVBE", resolvedPartIds),
+          report,
+          cache,
+        )
+      : empty(),
+  ]);
+
+  const knResults = new Map<string, FeatureCollection>([
+    ["PARCELE", parcels],
+    ["STAVBE", buildings],
+    ["DELI_STAVB", parts],
+    ["STAVBE_PARCELE", relationships],
+    ["KATASTRSKE_OBCINE", municipalities],
+    ["NASLOVI_HS", addresses],
+  ]);
+  const evResults = new Map<string, FeatureCollection>([
+    ["PARCELA", evParcels],
+    ["PARC_ENOTA", evParcelUnits],
+    ["STAVBA", evBuildings],
+    ["DEL_STAVBE", evParts],
+    ["DEL_STAVBE_ENOTA", evPartUnits],
+  ]);
+  const coverage: Coverage = {
+    anchorTransactions: anchors.transactions.length,
+    buildingPartItems: anchors.buildingParts.length,
+    resolvedBuildingPartItems:
+      anchors.buildingParts.length - unresolvedBuildingPartItems.length,
+    unresolvedBuildingPartItems,
+    landItems: anchors.land.length,
+    resolvedLandItems: anchors.land.length - unresolvedLandItems.length,
+    unresolvedLandItems,
+  };
+
+  report?.({
+    phase: "resolve",
+    source: "GURS property graph",
+    message: "Resolved ETN items and expanded the one-hop property graph",
+    details: {
+      ...coverage,
+      unresolvedBuildingPartItems: unresolvedBuildingPartItems.length,
+      unresolvedLandItems: unresolvedLandItems.length,
+      buildings: buildings.features.length,
+      buildingParts: parts.features.length,
+      addresses: addresses.features.length,
+      parcels: parcels.features.length,
+      buildingParcelRelationships: relationships.features.length,
+      cadastralMunicipalities: municipalities.features.length,
+    },
+  });
+
+  return { knResults, evResults, coverage };
 }
 
 function checkedSqlIdentifier(identifier: string): string {
@@ -142,7 +1073,8 @@ async function upsertRows(
   table: string,
   conflictColumns: string[],
   rows: JsonObject[],
-  batchSize = 200,
+  batchSize = WRITE_BATCH_SIZE,
+  report?: ProgressReporter,
 ): Promise<void> {
   if (rows.length === 0) {
     return;
@@ -171,8 +1103,11 @@ async function upsertRows(
       .join(", ")})`,
   ].join(" ");
 
+  const totalBatches = Math.ceil(rows.length / batchSize);
+
   for (let offset = 0; offset < rows.length; offset += batchSize) {
     const batch = rows.slice(offset, offset + batchSize);
+    const batchNumber = Math.floor(offset / batchSize) + 1;
     const values: unknown[] = [];
     const tuples = batch.map((row, rowIndex) => {
       const placeholders = columns.map((column, columnIndex) => {
@@ -191,6 +1126,25 @@ async function upsertRows(
       ].join("\n"),
       values,
     );
+
+    if (
+      batchNumber === 1 ||
+      batchNumber === totalBatches ||
+      batchNumber % 10 === 0
+    ) {
+      report?.({
+        phase: "write",
+        source: table,
+        message: `Staged batch ${batchNumber}/${totalBatches} for ${table}`,
+        details: {
+          batch: batchNumber,
+          totalBatches,
+          batchRows: batch.length,
+          writtenRows: offset + batch.length,
+          totalRows: rows.length,
+        },
+      });
+    }
   }
 }
 
@@ -199,29 +1153,70 @@ async function enrichRowsByKey(
   table: string,
   keyColumn: string,
   rows: JsonObject[],
+  columnTypes: Record<string, SqlValueType>,
+  report?: ProgressReporter,
+  batchSize = WRITE_BATCH_SIZE,
 ): Promise<void> {
   const quotedTable = checkedSqlIdentifier(table);
   const quotedKey = checkedSqlIdentifier(keyColumn);
+  const columns = Object.keys(rows[0] ?? {}).filter(
+    (column) => column !== keyColumn,
+  );
+  const incomingColumns = [
+    `${quotedKey} text`,
+    ...columns.map((column) => {
+      const columnType = columnTypes[column];
 
-  for (const row of rows) {
-    const key = row[keyColumn];
-    const columns = Object.keys(row).filter((column) => column !== keyColumn);
-    const values = [key, ...columns.map((column) => row[column] ?? null)];
-    const assignments = columns.map((column, index) => {
-      const quotedColumn = checkedSqlIdentifier(column);
-      const incomingValue = `$${index + 2}`;
-
-      if (column.endsWith("_source_key")) {
-        return `${quotedColumn} = ${incomingValue}`;
+      if (!columnType) {
+        throw new Error(`Missing SQL type for ${table}.${column}`);
       }
 
-      return `${quotedColumn} = COALESCE(${quotedTable}.${quotedColumn}, ${incomingValue})`;
-    });
+      return `${checkedSqlIdentifier(column)} ${columnType}`;
+    }),
+  ];
+  const assignments = columns.map((column) => {
+    const quotedColumn = checkedSqlIdentifier(column);
+
+    if (column.endsWith("_source_key")) {
+      return `${quotedColumn} = incoming.${quotedColumn}`;
+    }
+
+    return `${quotedColumn} = COALESCE(target.${quotedColumn}, incoming.${quotedColumn})`;
+  });
+  const totalBatches = Math.ceil(rows.length / batchSize);
+
+  for (let offset = 0; offset < rows.length; offset += batchSize) {
+    const batch = rows.slice(offset, offset + batchSize);
+    const batchNumber = Math.floor(offset / batchSize) + 1;
 
     await pool.query(
-      `UPDATE ${quotedTable} SET ${assignments.join(", ")} WHERE ${quotedKey} = $1`,
-      values,
+      [
+        `UPDATE ${quotedTable} AS target`,
+        `SET ${assignments.join(", ")}`,
+        `FROM jsonb_to_recordset($1::jsonb) AS incoming (${incomingColumns.join(", ")})`,
+        `WHERE target.${quotedKey} = incoming.${quotedKey}`,
+      ].join("\n"),
+      [JSON.stringify(batch)],
     );
+
+    if (
+      batchNumber === 1 ||
+      batchNumber === totalBatches ||
+      batchNumber % 10 === 0
+    ) {
+      report?.({
+        phase: "write",
+        source: table,
+        message: `Staged enrichment batch ${batchNumber}/${totalBatches} for ${table}`,
+        details: {
+          batch: batchNumber,
+          totalBatches,
+          batchRows: batch.length,
+          processedRows: offset + batch.length,
+          totalRows: rows.length,
+        },
+      });
+    }
   }
 }
 
@@ -276,8 +1271,9 @@ async function recordSource(
 }
 
 async function ingestKn(
-  pool: Pool,
+  pool: Queryable,
   collections: Map<string, FeatureCollection>,
+  report?: ProgressReporter,
 ): Promise<ImportSummary[]> {
   const summaries: ImportSummary[] = [];
 
@@ -318,8 +1314,19 @@ async function ingestKn(
       source_key: sourceKey("kn-PARCELE"),
     };
   });
-  await upsertRows(pool, "gurs_kn_parcels", ["eid_parcela"], parcels);
-  summaries.push({ source: "KN PARCELE sample", rows: parcels.length });
+  await upsertRows(
+    pool,
+    "gurs_kn_parcels",
+    ["eid_parcela"],
+    parcels,
+    WRITE_BATCH_SIZE,
+    report,
+  );
+  addSummary(
+    summaries,
+    { source: "KN PARCELE sample", rows: parcels.length },
+    report,
+  );
 
   const buildings = collections.get("STAVBE")!.features.map((feature) => {
     const p = feature.properties;
@@ -347,13 +1354,28 @@ async function ingestKn(
       centroid_e: numberValue(p.E_CEN),
       centroid_n: numberValue(p.N_CEN),
       footprint_geometry:
-        p.OBRIS_GEOM ?? p.NADZEMNI_GEOM ?? p.TLORIS_GEOM ?? null,
+        p.OBRIS_GEOM ??
+        p.NADZEMNI_GEOM ??
+        p.TLORIS_GEOM ??
+        feature.geometry ??
+        null,
       source_updated_at: text(p.DATUM_SYS),
       source_key: sourceKey("kn-STAVBE"),
     };
   });
-  await upsertRows(pool, "gurs_kn_buildings", ["eid_stavba"], buildings);
-  summaries.push({ source: "KN STAVBE sample", rows: buildings.length });
+  await upsertRows(
+    pool,
+    "gurs_kn_buildings",
+    ["eid_stavba"],
+    buildings,
+    WRITE_BATCH_SIZE,
+    report,
+  );
+  addSummary(
+    summaries,
+    { source: "KN STAVBE sample", rows: buildings.length },
+    report,
+  );
 
   const buildingParts = collections
     .get("DELI_STAVB")!
@@ -388,11 +1410,17 @@ async function ingestKn(
     "gurs_kn_building_parts",
     ["eid_del_stavbe"],
     buildingParts,
+    WRITE_BATCH_SIZE,
+    report,
   );
-  summaries.push({
-    source: "KN DELI_STAVB sample",
-    rows: buildingParts.length,
-  });
+  addSummary(
+    summaries,
+    {
+      source: "KN DELI_STAVB sample",
+      rows: buildingParts.length,
+    },
+    report,
+  );
 
   const buildingParcels = collections
     .get("STAVBE_PARCELE")!
@@ -412,11 +1440,17 @@ async function ingestKn(
     "gurs_kn_building_parcels",
     ["eid_stavba_parcela"],
     buildingParcels,
+    WRITE_BATCH_SIZE,
+    report,
   );
-  summaries.push({
-    source: "KN STAVBE_PARCELE sample",
-    rows: buildingParcels.length,
-  });
+  addSummary(
+    summaries,
+    {
+      source: "KN STAVBE_PARCELE sample",
+      rows: buildingParcels.length,
+    },
+    report,
+  );
 
   const municipalities = collections
     .get("KATASTRSKE_OBCINE")!
@@ -436,11 +1470,17 @@ async function ingestKn(
     "gurs_kn_cadastral_municipalities",
     ["eid_katastrska_obcina"],
     municipalities,
+    WRITE_BATCH_SIZE,
+    report,
   );
-  summaries.push({
-    source: "KN KATASTRSKE_OBCINE sample",
-    rows: municipalities.length,
-  });
+  addSummary(
+    summaries,
+    {
+      source: "KN KATASTRSKE_OBCINE sample",
+      rows: municipalities.length,
+    },
+    report,
+  );
 
   const addresses = collections.get("NASLOVI_HS")!.features.map((feature) => {
     const p = feature.properties;
@@ -466,15 +1506,22 @@ async function ingestKn(
     "gurs_kn_addresses",
     ["eid_hisna_stevilka"],
     addresses,
+    WRITE_BATCH_SIZE,
+    report,
   );
-  summaries.push({ source: "KN NASLOVI_HS sample", rows: addresses.length });
+  addSummary(
+    summaries,
+    { source: "KN NASLOVI_HS sample", rows: addresses.length },
+    report,
+  );
 
   return summaries;
 }
 
 async function ingestEv(
-  pool: Pool,
+  pool: Queryable,
   collections: Map<string, FeatureCollection>,
+  report?: ProgressReporter,
 ): Promise<ImportSummary[]> {
   const summaries: ImportSummary[] = [];
 
@@ -509,13 +1556,29 @@ async function ingestEv(
       ev_source_key: sourceKey("ev-PARCELA"),
     };
   });
-  await enrichRowsByKey(pool, "gurs_kn_parcels", "eid_parcela", parcels);
-  summaries.push({
-    source: "EV PARCELA enrichment sample",
-    rows: parcels.length,
-  });
+  await enrichRowsByKey(
+    pool,
+    "gurs_kn_parcels",
+    "eid_parcela",
+    parcels,
+    {
+      land_rating: "integer",
+      accessibility: "integer",
+      site_coefficient: "integer",
+      ev_source_key: "text",
+    },
+    report,
+  );
+  addSummary(
+    summaries,
+    {
+      source: "EV PARCELA enrichment sample",
+      rows: parcels.length,
+    },
+    report,
+  );
 
-  const parcelUnits = collections
+  const parsedParcelUnits = collections
     .get("PARC_ENOTA")!
     .features.map((feature) => {
       const p = feature.properties;
@@ -530,13 +1593,30 @@ async function ingestEv(
         source_key: sourceKey("ev-PARC_ENOTA"),
       };
     });
+  const parcelUnits = filterRequiredRows(parsedParcelUnits, [
+    "parcel_unit_id",
+    "eid_parcela",
+    "valuation_model_id",
+    "modelled_value",
+  ]);
   await upsertRows(
     pool,
     "gurs_ev_parcel_units",
     ["parcel_unit_id"],
-    parcelUnits,
+    parcelUnits.validRows,
+    WRITE_BATCH_SIZE,
+    report,
   );
-  summaries.push({ source: "EV PARC_ENOTA sample", rows: parcelUnits.length });
+  addSummary(
+    summaries,
+    {
+      source: "EV PARC_ENOTA sample",
+      rows: parcelUnits.validRows.length,
+      skippedRows: parcelUnits.skippedRows,
+      skipReason: "missing required valuation fields",
+    },
+    report,
+  );
 
   const buildings = collections.get("STAVBA")!.features.map((feature) => {
     const p = feature.properties;
@@ -560,11 +1640,39 @@ async function ingestEv(
       ev_source_key: sourceKey("ev-STAVBA"),
     };
   });
-  await enrichRowsByKey(pool, "gurs_kn_buildings", "eid_stavba", buildings);
-  summaries.push({
-    source: "EV STAVBA enrichment sample",
-    rows: buildings.length,
-  });
+  await enrichRowsByKey(
+    pool,
+    "gurs_kn_buildings",
+    "eid_stavba",
+    buildings,
+    {
+      floor_count: "integer",
+      apartment_count: "integer",
+      business_premises_count: "integer",
+      gross_floor_area: "numeric",
+      construction_year: "integer",
+      facade_renovation_year: "integer",
+      roof_renovation_year: "integer",
+      building_type_code: "integer",
+      building_type_name: "text",
+      construction_type_code: "integer",
+      construction_type_name: "text",
+      electricity_code: "integer",
+      gas_code: "integer",
+      water_code: "integer",
+      sewer_code: "integer",
+      ev_source_key: "text",
+    },
+    report,
+  );
+  addSummary(
+    summaries,
+    {
+      source: "EV STAVBA enrichment sample",
+      rows: buildings.length,
+    },
+    report,
+  );
 
   const buildingParts = collections
     .get("DEL_STAVBE")!
@@ -592,13 +1700,33 @@ async function ingestEv(
     "gurs_kn_building_parts",
     "eid_del_stavbe",
     buildingParts,
+    {
+      eid_hisna_stevilka: "text",
+      apartment_number: "integer",
+      area: "numeric",
+      useful_area: "numeric",
+      actual_use_code: "integer",
+      actual_use_name: "text",
+      floor_number: "integer",
+      position_code: "integer",
+      position_name: "text",
+      elevator_code: "integer",
+      window_renovation_year: "integer",
+      installation_renovation_year: "integer",
+      ev_source_key: "text",
+    },
+    report,
   );
-  summaries.push({
-    source: "EV DEL_STAVBE enrichment sample",
-    rows: buildingParts.length,
-  });
+  addSummary(
+    summaries,
+    {
+      source: "EV DEL_STAVBE enrichment sample",
+      rows: buildingParts.length,
+    },
+    report,
+  );
 
-  const buildingPartUnits = collections
+  const parsedBuildingPartUnits = collections
     .get("DEL_STAVBE_ENOTA")!
     .features.map((feature) => {
       const p = feature.properties;
@@ -611,77 +1739,236 @@ async function ingestEv(
         source_key: sourceKey("ev-DEL_STAVBE_ENOTA"),
       };
     });
+  const buildingPartUnits = filterRequiredRows(parsedBuildingPartUnits, [
+    "eid_del_stavbe",
+    "valuation_model_id",
+    "modelled_value",
+  ]);
   await upsertRows(
     pool,
     "gurs_ev_building_part_units",
     ["eid_del_stavbe"],
-    buildingPartUnits,
+    buildingPartUnits.validRows,
+    WRITE_BATCH_SIZE,
+    report,
   );
-  summaries.push({
-    source: "EV DEL_STAVBE_ENOTA sample",
-    rows: buildingPartUnits.length,
-  });
+  addSummary(
+    summaries,
+    {
+      source: "EV DEL_STAVBE_ENOTA sample",
+      rows: buildingPartUnits.validRows.length,
+      skippedRows: buildingPartUnits.skippedRows,
+      skipReason: "missing required valuation fields",
+    },
+    report,
+  );
 
   return summaries;
 }
 
-async function ingestAddressSearch(pool: Pool): Promise<ImportSummary[]> {
-  const searches = [
-    { source: "Naslovi stavb", filter: "trnje 10 4220" },
-    { source: "Naslovi stanovanj", filter: "ziherlova 40b 202" },
-  ];
-  let resultCount = 0;
+async function fetchLiveSamples(
+  sampleSize: number,
+  report?: ProgressReporter,
+  cache?: FetchCache,
+): Promise<{
+  knResults: Map<string, FeatureCollection>;
+  evResults: Map<string, FeatureCollection>;
+}> {
+  async function fetchGroup(
+    baseUrl: string,
+    collections: readonly string[],
+  ): Promise<Map<string, FeatureCollection>> {
+    const results = new Map<string, FeatureCollection>();
 
-  for (const search of searches) {
-    const url = new URL(ADDRESS_BASE);
-    url.searchParams.set("vir", search.source);
-    url.searchParams.set("filter", search.filter);
-    const data = await fetchJson<FeatureCollection>(url);
-    const key = sourceKey(`address-${search.source}`);
+    for (const collection of collections) {
+      results.set(
+        collection,
+        await fetchCollection(
+          baseUrl,
+          collection,
+          sampleSize,
+          report,
+          cache,
+        ),
+      );
+    }
 
-    await recordSource(pool, {
-      datasetName: `Iskanje naslovov – ${search.source}`,
-      sourceUrl: url.toString(),
-      sourceKey: key,
-      updateFrequency: "live service",
-      metadata: {
-        importedSampleRows: data.features.length,
-        documentedExample: true,
-        coordinates: "EPSG:3794",
-      },
-    });
-    resultCount += data.features.length;
+    return results;
   }
 
-  return [
-    {
-      source: "Address API validation (metadata only)",
-      rows: resultCount,
-    },
-  ];
-}
-
-async function ingestLiveSamples(pool: Pool): Promise<ImportSummary[]> {
   const [knResults, evResults] = await Promise.all([
-    Promise.all(
-      KN_COLLECTIONS.map(async (collection) => [
-        collection,
-        await fetchCollection(KN_BASE, collection),
-      ] as const),
-    ),
-    Promise.all(
-      EV_COLLECTIONS.map(async (collection) => [
-        collection,
-        await fetchCollection(EV_BASE, collection),
-      ] as const),
-    ),
+    fetchGroup(KN_BASE, KN_COLLECTIONS),
+    fetchGroup(EV_BASE, EV_COLLECTIONS),
   ]);
 
-  return [
-    ...(await ingestKn(pool, new Map(knResults))),
-    ...(await ingestEv(pool, new Map(evResults))),
-    ...(await ingestAddressSearch(pool)),
-  ];
+  return {
+    knResults,
+    evResults,
+  };
+}
+
+async function clearLiveData(pool: Queryable): Promise<void> {
+  await pool.query(
+    [
+      "DELETE FROM gurs_source_retrievals",
+      "WHERE source_key LIKE 'kn-%'",
+      "   OR source_key LIKE 'ev-%'",
+      "   OR source_key LIKE 'address-%'",
+    ].join("\n"),
+  );
+}
+
+async function createStagingTables(pool: Queryable): Promise<void> {
+  for (const table of LIVE_DATA_TABLES) {
+    await pool.query(
+      `CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING ALL) ON COMMIT DROP`,
+    );
+  }
+}
+
+async function replaceFromStaging(pool: Queryable): Promise<void> {
+  await pool.query(
+    `TRUNCATE TABLE ${LIVE_DATA_TABLES.map((table) => `public.${table}`).join(", ")}`,
+  );
+  for (const table of LIVE_DATA_TABLES) {
+    await pool.query(
+      `INSERT INTO public.${table} SELECT * FROM pg_temp.${table}`,
+    );
+  }
+
+  await resolveEtnLinks(pool);
+}
+
+async function resolveEtnLinks(pool: Queryable): Promise<void> {
+  await pool.query("UPDATE public.gurs_etn_building_parts SET eid_del_stavbe = NULL");
+  await pool.query(`
+    UPDATE public.gurs_etn_building_parts AS item
+    SET eid_del_stavbe = part.eid_del_stavbe
+    FROM public.gurs_kn_building_parts AS part
+    WHERE
+      item.ko_id = part.ko_id
+      AND item.building_number = part.building_number
+      AND item.part_number = part.part_number
+  `);
+  await pool.query("UPDATE public.gurs_etn_land SET eid_parcela = NULL");
+  await pool.query(`
+    UPDATE public.gurs_etn_land AS item
+    SET eid_parcela = parcel.eid_parcela
+    FROM public.gurs_kn_parcels AS parcel
+    WHERE
+      item.ko_id = parcel.ko_id
+      -- Do not let a locale-dependent btree order drive this join. An index
+      -- built under different collation data can make PostgreSQL's merge join
+      -- fail with "mergejoin input data is out of order". The C collation is
+      -- byte-stable and makes the natural-key comparison deterministic.
+      AND item.parcel_number COLLATE "C" = parcel.parcel_number COLLATE "C"
+  `);
+}
+
+export type LiveIngestResult = {
+  retrievedAt: string;
+  sampleSize: number;
+  transactionYear: number;
+  summaries: ImportSummary[];
+  coverage?: Coverage;
+};
+
+export type LiveIngestOptions = {
+  onProgress?: ProgressReporter;
+  transactionYear?: number;
+};
+
+export async function replaceLiveGursSample(
+  pool: Pool,
+  requestedSampleSize: unknown,
+  options: LiveIngestOptions = {},
+): Promise<LiveIngestResult> {
+  const sampleSize = validateLiveSampleSize(requestedSampleSize);
+  const transactionYear = validateTransactionYear(
+    options.transactionYear ?? DEFAULT_TRANSACTION_YEAR,
+  );
+  const report = options.onProgress;
+  const anchors = await loadAnchorSet(
+    pool,
+    sampleSize,
+    transactionYear,
+    report,
+  );
+  const cache = anchors
+    ? await prepareFetchCache(
+        pool,
+        anchors,
+        sampleSize,
+        transactionYear,
+        report,
+      )
+    : undefined;
+  const graph = anchors
+    ? await fetchCoherentGraph(anchors, report, cache)
+    : {
+        ...(await fetchLiveSamples(sampleSize, report, cache)),
+        coverage: undefined,
+      };
+  const { knResults, evResults, coverage } = graph;
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtext('gurs-live-replacement'))",
+    );
+    await createStagingTables(client);
+    await clearLiveData(client);
+
+    const summaries = [
+      ...(await ingestKn(client, knResults, report)),
+      ...(await ingestEv(client, evResults, report)),
+    ];
+    await replaceFromStaging(client);
+    await refreshMapTables(client);
+    if (cache) await clearFetchCache(client, cache);
+    report?.({
+      phase: "replace",
+      source: "live GURS tables",
+      message: "Atomically replaced live GURS rows from staging",
+      details: {
+        tables: [...LIVE_DATA_TABLES],
+      },
+    });
+
+    await client.query("COMMIT");
+
+    const result = {
+      retrievedAt: new Date().toISOString(),
+      sampleSize,
+      transactionYear,
+      summaries,
+      ...(coverage ? { coverage } : {}),
+    };
+    report?.({
+      phase: "complete",
+      source: "live GURS replacement",
+      message: "Committed live GURS replacement",
+      details: {
+        sampleSize,
+        transactionYear,
+        importedRows: summaries.reduce(
+          (total, summary) => total + summary.rows,
+          0,
+        ),
+        skippedRows: summaries.reduce(
+          (total, summary) => total + (summary.skippedRows ?? 0),
+          0,
+        ),
+      },
+    });
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function requiredCsv(
@@ -738,7 +2025,7 @@ async function recordEtnSource(
   });
 }
 
-async function ingestEtn(
+export async function ingestEtn(
   pool: Pool,
   directory: string,
 ): Promise<ImportSummary[]> {
@@ -886,6 +2173,8 @@ async function ingestEtn(
       "Evidenca trga nepremičnin – šifranti",
       codeLists.length,
     );
+    await resolveEtnLinks(client);
+    await refreshMapTables(client);
 
     await client.query("COMMIT");
 
@@ -902,38 +2191,3 @@ async function ingestEtn(
     client.release();
   }
 }
-
-function getArgument(name: string): string | null {
-  const prefix = `--${name}=`;
-  return process.argv.find((argument) => argument.startsWith(prefix))?.slice(
-    prefix.length,
-  ) ?? null;
-}
-
-async function main(): Promise<void> {
-  const config = loadConfig();
-  const pool = createDatabase(config);
-  const etnDirectory = getArgument("etn-dir");
-  const skipLive = process.argv.includes("--skip-live");
-  const summaries: ImportSummary[] = [];
-
-  try {
-    if (!skipLive) {
-      summaries.push(...(await ingestLiveSamples(pool)));
-    }
-
-    if (etnDirectory) {
-      summaries.push(...(await ingestEtn(pool, etnDirectory)));
-    }
-
-    if (skipLive && !etnDirectory) {
-      throw new Error("Nothing to import: --skip-live requires --etn-dir");
-    }
-
-    console.log(JSON.stringify({ retrievedAt: new Date(), summaries }, null, 2));
-  } finally {
-    await pool.end();
-  }
-}
-
-await main();

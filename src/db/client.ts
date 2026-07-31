@@ -1,8 +1,8 @@
 import { Pool } from "pg";
 
-import type { AppConfig } from "../config.js";
+import type { DatabaseConfig } from "../config.js";
 
-export function createDatabase(config: AppConfig): Pool {
+export function createDatabase(config: DatabaseConfig): Pool {
   return new Pool({
     connectionString: config.databaseUrl,
     max: 10,
@@ -10,4 +10,3 @@ export function createDatabase(config: AppConfig): Pool {
     connectionTimeoutMillis: 5_000,
   });
 }
-

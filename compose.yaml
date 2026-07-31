@@ -8,6 +8,7 @@ services:
       HOST: 0.0.0.0
       PORT: 3000
       DATABASE_URL: postgres://postgres:postgres@db:5432/property_scraper
+      AUTH_KEY: ${AUTH_KEY:?Set AUTH_KEY in .env}
     ports:
       - "3000:3000"
     volumes:
@@ -18,7 +19,12 @@ services:
         condition: service_healthy
 
   db:
-    image: postgres:17-alpine
+    # Same PostgreSQL major/data directory layout as postgres:17-alpine, with
+    # PostGIS included, so the existing named volume is retained in place.
+    image: postgis/postgis:17-3.5
+    # postgis/postgis currently publishes amd64 images only. Docker Desktop
+    # transparently emulates this on Apple Silicon.
+    platform: linux/amd64
     environment:
       POSTGRES_DB: property_scraper
       POSTGRES_USER: postgres
