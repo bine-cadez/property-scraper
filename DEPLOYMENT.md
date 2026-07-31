@@ -49,17 +49,24 @@ The `production` GitHub environment uses these repository secrets:
 The Aiven URL and API key are deliberately not GitHub secrets because GitHub
 does not need them to deploy.
 
-## Domain and HTTPS
+## HTTPS
 
-The initial deployment uses `SITE_ADDRESS=:80`, so it is available over plain
-HTTP at the VM's IP address. Do not send the API key over an untrusted network
-until a domain and HTTPS are configured.
+The API uses the free hostname
+`property-scraper.46-224-27-216.sslip.io`, which resolves to the VM's public
+IP without a separately purchased domain. Caddy obtains and renews its trusted
+Let's Encrypt certificate automatically.
 
-To enable HTTPS:
+- Swagger: <https://property-scraper.46-224-27-216.sslip.io/docs>
+- API base URL: <https://property-scraper.46-224-27-216.sslip.io>
 
-1. Point a domain or subdomain's `A` record to `46.224.27.216`.
-2. Change `SITE_ADDRESS` in `/opt/property-scraper/.env` from `:80` to that
-   hostname.
+Plain HTTP redirects to HTTPS. The hostname depends on the public IP and on the
+third-party `sslip.io` DNS service, so an owned domain is preferable if this
+becomes a user-facing production service.
+
+To move to an owned domain later:
+
+1. Point the domain or subdomain's `A` record to `46.224.27.216`.
+2. Change `SITE_ADDRESS` in `/opt/property-scraper/.env` to that hostname.
 3. Redeploy Caddy:
 
 ```bash
@@ -68,7 +75,7 @@ cd /opt/property-scraper
 docker compose -f compose.yaml up -d caddy
 ```
 
-Caddy obtains and renews the TLS certificate automatically.
+Caddy will obtain and renew the replacement TLS certificate automatically.
 
 ## Operations
 
