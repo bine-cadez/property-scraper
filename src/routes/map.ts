@@ -69,6 +69,14 @@ function mapFilters(
         column: "feature.construction_year",
         type: "max",
       },
+      valuationValueMin: {
+        column: "feature.modelled_value",
+        type: "min",
+      },
+      valuationValueMax: {
+        column: "feature.modelled_value",
+        type: "max",
+      },
     },
     sales: {
       itemKind: { column: "feature.item_kind", type: "exact" },
@@ -93,6 +101,14 @@ function mapFilters(
       koId: { column: "feature.ko_id", type: "exact" },
       areaMin: { column: "feature.area", type: "min" },
       areaMax: { column: "feature.area", type: "max" },
+      valuationValueMin: {
+        column: "feature.modelled_value",
+        type: "min",
+      },
+      valuationValueMax: {
+        column: "feature.modelled_value",
+        type: "max",
+      },
     },
     cadastral: {
       koId: { column: "feature.ko_id", type: "exact" },
@@ -215,6 +231,7 @@ function propertyPinsAndFootprintsSql(filters: string): string {
         feature.construction_year,
         feature.building_type_code,
         feature.gross_floor_area,
+        feature.modelled_value,
         'pin'::text AS feature_type,
         ST_Transform(feature.pin, 3857) AS map_geometry
       FROM map.properties AS feature
@@ -234,6 +251,7 @@ function propertyPinsAndFootprintsSql(filters: string): string {
         feature.construction_year,
         feature.building_type_code,
         feature.gross_floor_area,
+        feature.modelled_value,
         'footprint'::text AS feature_type,
         ST_Transform(feature.footprint, 3857) AS map_geometry
       FROM map.properties AS feature
@@ -256,6 +274,7 @@ function propertyPinsAndFootprintsSql(filters: string): string {
         source_features.construction_year,
         source_features.building_type_code,
         source_features.gross_floor_area,
+        source_features.modelled_value,
         source_features.feature_type,
         ST_AsMVTGeom(
           source_features.map_geometry,
@@ -345,7 +364,8 @@ export function mapRoutes(database: Pool): FastifyPluginAsync {
                   feature.full_address,
                   feature.construction_year,
                   feature.building_type_code,
-                  feature.gross_floor_area
+                  feature.gross_floor_area,
+                  feature.modelled_value
                 `,
                 filters,
                 );
@@ -372,7 +392,7 @@ export function mapRoutes(database: Pool): FastifyPluginAsync {
         sql = polygonSql(
           "parcels",
           "eid_parcela",
-          "feature.ko_id, feature.parcel_number, feature.area",
+          "feature.ko_id, feature.parcel_number, feature.area, feature.modelled_value",
           filters,
         );
       } else if (layer === "cadastral" && z >= 8) {

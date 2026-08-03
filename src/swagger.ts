@@ -86,7 +86,7 @@ const operationDocumentation: Record<string, OperationDocumentation> = {
     summary: "View one land parcel and its connections",
     description: paragraphs(
       "Returns the details of one registered parcel, including its identity, area, status, and other available cadastral information.",
-      "It also shows how many buildings, addresses, building parts, valuation units, and recorded sales are connected to the parcel, with links for opening those related records. A connected modelled value is an official estimate and should not be read as the parcel’s current sale price.",
+      "It also includes arrays containing all connected buildings, addresses, building parts, valuation units, and recorded sales. A connected modelled value is an official estimate and should not be read as the parcel’s current sale price.",
     ),
   },
   "/gurs/buildings": {
@@ -97,7 +97,7 @@ const operationDocumentation: Record<string, OperationDocumentation> = {
   "/gurs/buildings/:id": {
     summary: "View one building and its connections",
     description:
-      "Returns the details of one whole building. It also includes counts and links for its addresses, individual building parts, land parcels, valuation records, and recorded sales, making this the main starting point for exploring everything connected to a structure.",
+      "Returns the details of one whole building together with arrays containing all of its addresses, individual building parts, land parcels, valuation records, and recorded sales.",
   },
   "/gurs/building-parts": {
     summary: "Browse flats and other building units",
@@ -107,7 +107,7 @@ const operationDocumentation: Record<string, OperationDocumentation> = {
   "/gurs/building-parts/:id": {
     summary: "View one flat or other building unit",
     description:
-      "Returns the details of one separately registered building part. It also links back to the whole building and to related addresses, parcels, official modelled values, and recorded sales.",
+      "Returns the details of one separately registered building part together with its building and arrays containing the building’s addresses and parcels, plus the part’s official modelled values and recorded sales.",
   },
   "/gurs/buildings/:id/valuation-units": {
     summary: "See official modelled values within a building",
@@ -155,6 +155,7 @@ const operationDocumentation: Record<string, OperationDocumentation> = {
     summary: "Load property shapes and points for a map",
     description: paragraphs(
       "Returns the data a map application needs to draw one small section of the map. Choose `properties` for buildings, `sales` for recorded-sale locations, `parcels` for land boundaries, or `cadastral` for cadastral municipality boundaries.",
+      "Individual building and parcel features include one `modelled_value`: the sum of their related GURS valuation-unit values. A missing value remains empty rather than being reported as zero.",
       "The answer is a Mapbox Vector Tile intended for mapping software, not a normal text or JSON response. At wide map views some point layers are grouped into clusters, and detailed parcel or building shapes only appear when the map is zoomed in far enough.",
     ),
   },

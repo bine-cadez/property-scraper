@@ -486,13 +486,6 @@ const codeLists: ListDefinition = {
   },
 };
 
-function relationship(count: unknown, href: string): {
-  count: number;
-  href: string;
-} {
-  return { count: Number(count ?? 0), href };
-}
-
 export function readRoutes(database: Pool): FastifyPluginAsync {
   return async (app) => {
     app.get<{ Querystring: QueryParameters }>("/gurs/sources", async (request) =>
@@ -613,19 +606,7 @@ export function readRoutes(database: Pool): FastifyPluginAsync {
           database,
           reply,
           `
-            SELECT parcel.*,
-              (SELECT count(*) FROM gurs_kn_building_parcels relation
-               WHERE relation.eid_parcela = parcel.eid_parcela)::int AS building_count,
-              (SELECT count(*) FROM gurs_ev_parcel_units valuation
-               WHERE valuation.eid_parcela = parcel.eid_parcela)::int AS valuation_count,
-              (SELECT count(*) FROM gurs_kn_building_parts part
-               JOIN gurs_kn_building_parcels relation USING (eid_stavba)
-               WHERE relation.eid_parcela = parcel.eid_parcela)::int AS part_count,
-              (SELECT count(*) FROM gurs_kn_addresses address
-               JOIN gurs_kn_building_parcels relation USING (eid_stavba)
-               WHERE relation.eid_parcela = parcel.eid_parcela)::int AS address_count,
-              (SELECT count(*) FROM gurs_etn_land sale
-               WHERE sale.eid_parcela = parcel.eid_parcela)::int AS sale_count
+            SELECT parcel.*
             FROM gurs_kn_parcels parcel
             WHERE parcel.eid_parcela = $1
           `,
@@ -633,30 +614,104 @@ export function readRoutes(database: Pool): FastifyPluginAsync {
           parcels.numericFields,
         );
         if ("statusCode" in entity) return entity;
+
+        const [
+          buildingResult,
+          valuationResult,
+          addressResult,
+          partResult,
+          saleResult,
+        ] = (await Promise.all([
+          database.query(
+            `
+              SELECT building.*
+              FROM gurs_kn_buildings building
+              WHERE EXISTS (
+                SELECT 1
+                FROM gurs_kn_building_parcels relation
+                WHERE relation.eid_stavba = building.eid_stavba
+                  AND relation.eid_parcela = $1
+              )
+              ORDER BY building.eid_stavba
+            `,
+            [request.params.id],
+          ),
+          database.query(
+            `
+              SELECT *
+              FROM gurs_ev_parcel_units
+              WHERE eid_parcela = $1
+              ORDER BY parcel_unit_id
+            `,
+            [request.params.id],
+          ),
+          database.query(
+            `
+              SELECT address.*
+              FROM gurs_kn_addresses address
+              WHERE EXISTS (
+                SELECT 1
+                FROM gurs_kn_building_parcels relation
+                WHERE relation.eid_stavba = address.eid_stavba
+                  AND relation.eid_parcela = $1
+              )
+              ORDER BY address.eid_hisna_stevilka
+            `,
+            [request.params.id],
+          ),
+          database.query(
+            `
+              SELECT part.*
+              FROM gurs_kn_building_parts part
+              WHERE EXISTS (
+                SELECT 1
+                FROM gurs_kn_building_parcels relation
+                WHERE relation.eid_stavba = part.eid_stavba
+                  AND relation.eid_parcela = $1
+              )
+              ORDER BY part.eid_del_stavbe
+            `,
+            [request.params.id],
+          ),
+          database.query(
+            `
+              SELECT transaction.*, transaction.id_posla::text AS id_posla
+              FROM gurs_etn_transactions transaction
+              WHERE EXISTS (
+                SELECT 1
+                FROM gurs_etn_land item
+                WHERE item.id_posla = transaction.id_posla
+                  AND item.eid_parcela = $1
+              )
+              ORDER BY transaction.id_posla
+            `,
+            [request.params.id],
+          ),
+        ])) as [
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+        ];
+
         return {
           ...entity,
-          relationships: {
-            buildings: relationship(
-              entity.buildingCount,
-              `/gurs/buildings?parcelId=${request.params.id}`,
-            ),
-            valuationUnits: relationship(
-              entity.valuationCount,
-              `/gurs/parcels/${request.params.id}/valuation-units`,
-            ),
-            addresses: relationship(
-              entity.addressCount,
-              `/gurs/addresses?parcelId=${request.params.id}`,
-            ),
-            parts: relationship(
-              entity.partCount,
-              `/gurs/building-parts?parcelId=${request.params.id}`,
-            ),
-            sales: relationship(
-              entity.saleCount,
-              `/gurs/transactions?parcelId=${request.params.id}`,
-            ),
-          },
+          buildings: buildingResult.rows.map((row) =>
+            serializeRow(row, buildings.numericFields),
+          ),
+          valuationUnits: valuationResult.rows.map((row) =>
+            serializeRow(row, numeric("area_share", "modelled_value")),
+          ),
+          addresses: addressResult.rows.map((row) =>
+            serializeRow(row, addresses.numericFields),
+          ),
+          parts: partResult.rows.map((row) =>
+            serializeRow(row, buildingParts.numericFields),
+          ),
+          sales: saleResult.rows.map((row) =>
+            serializeRow(row, transactions.numericFields),
+          ),
         };
       },
     );
@@ -672,19 +727,7 @@ export function readRoutes(database: Pool): FastifyPluginAsync {
           database,
           reply,
           `
-            SELECT building.*,
-              (SELECT count(*) FROM gurs_kn_addresses address
-               WHERE address.eid_stavba = building.eid_stavba)::int AS address_count,
-              (SELECT count(*) FROM gurs_kn_building_parts part
-               WHERE part.eid_stavba = building.eid_stavba)::int AS part_count,
-              (SELECT count(*) FROM gurs_kn_building_parcels relation
-               WHERE relation.eid_stavba = building.eid_stavba)::int AS parcel_count,
-              (SELECT count(*) FROM gurs_ev_building_part_units valuation
-               JOIN gurs_kn_building_parts part USING (eid_del_stavbe)
-               WHERE part.eid_stavba = building.eid_stavba)::int AS valuation_count,
-              (SELECT count(*) FROM gurs_etn_building_parts sale
-               JOIN gurs_kn_building_parts part USING (eid_del_stavbe)
-               WHERE part.eid_stavba = building.eid_stavba)::int AS sale_count
+            SELECT building.*
             FROM gurs_kn_buildings building
             WHERE building.eid_stavba = $1
           `,
@@ -692,30 +735,95 @@ export function readRoutes(database: Pool): FastifyPluginAsync {
           buildings.numericFields,
         );
         if ("statusCode" in entity) return entity;
+
+        const [
+          addressResult,
+          partResult,
+          parcelResult,
+          valuationResult,
+          saleResult,
+        ] = (await Promise.all([
+          database.query(
+            `
+              SELECT *
+              FROM gurs_kn_addresses
+              WHERE eid_stavba = $1
+              ORDER BY eid_hisna_stevilka
+            `,
+            [request.params.id],
+          ),
+          database.query(
+            `
+              SELECT *
+              FROM gurs_kn_building_parts
+              WHERE eid_stavba = $1
+              ORDER BY eid_del_stavbe
+            `,
+            [request.params.id],
+          ),
+          database.query(
+            `
+              SELECT parcel.*
+              FROM gurs_kn_parcels parcel
+              JOIN gurs_kn_building_parcels relation USING (eid_parcela)
+              WHERE relation.eid_stavba = $1
+              ORDER BY parcel.eid_parcela
+            `,
+            [request.params.id],
+          ),
+          database.query(
+            `
+              SELECT valuation.*
+              FROM gurs_ev_building_part_units valuation
+              JOIN gurs_kn_building_parts part USING (eid_del_stavbe)
+              WHERE part.eid_stavba = $1
+              ORDER BY valuation.eid_del_stavbe
+            `,
+            [request.params.id],
+          ),
+          database.query(
+            `
+              SELECT transaction.*, transaction.id_posla::text AS id_posla
+              FROM gurs_etn_transactions transaction
+              WHERE EXISTS (
+                SELECT 1
+                FROM gurs_etn_building_parts item
+                JOIN gurs_kn_building_parts part USING (eid_del_stavbe)
+                WHERE item.id_posla = transaction.id_posla
+                  AND part.eid_stavba = $1
+              )
+              ORDER BY transaction.id_posla
+            `,
+            [request.params.id],
+          ),
+        ])) as [
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+        ];
+
         return {
           ...entity,
-          relationships: {
-            addresses: relationship(
-              entity.addressCount,
-              `/gurs/addresses?eidStavba=${request.params.id}`,
+          addresses: addressResult.rows.map((row) =>
+            serializeRow(row, addresses.numericFields),
+          ),
+          parts: partResult.rows.map((row) =>
+            serializeRow(row, buildingParts.numericFields),
+          ),
+          parcels: parcelResult.rows.map((row) =>
+            serializeRow(row, parcels.numericFields),
+          ),
+          valuationUnits: valuationResult.rows.map((row) =>
+            serializeRow(
+              row,
+              numeric("special_circumstance_effect", "modelled_value"),
             ),
-            parts: relationship(
-              entity.partCount,
-              `/gurs/building-parts?eidStavba=${request.params.id}`,
-            ),
-            parcels: relationship(
-              entity.parcelCount,
-              `/gurs/parcels?eidStavba=${request.params.id}`,
-            ),
-            valuationUnits: relationship(
-              entity.valuationCount,
-              `/gurs/buildings/${request.params.id}/valuation-units`,
-            ),
-            sales: relationship(
-              entity.saleCount,
-              `/gurs/transactions?eidStavba=${request.params.id}`,
-            ),
-          },
+          ),
+          sales: saleResult.rows.map((row) =>
+            serializeRow(row, transactions.numericFields),
+          ),
         };
       },
     );
@@ -731,11 +839,7 @@ export function readRoutes(database: Pool): FastifyPluginAsync {
           database,
           reply,
           `
-            SELECT part.*,
-              (SELECT count(*) FROM gurs_ev_building_part_units valuation
-               WHERE valuation.eid_del_stavbe = part.eid_del_stavbe)::int AS valuation_count,
-              (SELECT count(*) FROM gurs_etn_building_parts sale
-               WHERE sale.eid_del_stavbe = part.eid_del_stavbe)::int AS sale_count
+            SELECT part.*
             FROM gurs_kn_building_parts part
             WHERE part.eid_del_stavbe = $1
           `,
@@ -743,28 +847,93 @@ export function readRoutes(database: Pool): FastifyPluginAsync {
           buildingParts.numericFields,
         );
         if ("statusCode" in entity) return entity;
+
+        const [
+          buildingResult,
+          addressResult,
+          parcelResult,
+          valuationResult,
+          saleResult,
+        ] = (await Promise.all([
+          database.query(
+            `
+              SELECT *
+              FROM gurs_kn_buildings
+              WHERE eid_stavba = $1
+            `,
+            [entity.eidStavba],
+          ),
+          database.query(
+            `
+              SELECT *
+              FROM gurs_kn_addresses
+              WHERE eid_stavba = $1
+              ORDER BY eid_hisna_stevilka
+            `,
+            [entity.eidStavba],
+          ),
+          database.query(
+            `
+              SELECT parcel.*
+              FROM gurs_kn_parcels parcel
+              JOIN gurs_kn_building_parcels relation USING (eid_parcela)
+              WHERE relation.eid_stavba = $1
+              ORDER BY parcel.eid_parcela
+            `,
+            [entity.eidStavba],
+          ),
+          database.query(
+            `
+              SELECT *
+              FROM gurs_ev_building_part_units
+              WHERE eid_del_stavbe = $1
+              ORDER BY eid_del_stavbe
+            `,
+            [request.params.id],
+          ),
+          database.query(
+            `
+              SELECT transaction.*, transaction.id_posla::text AS id_posla
+              FROM gurs_etn_transactions transaction
+              WHERE EXISTS (
+                SELECT 1
+                FROM gurs_etn_building_parts item
+                WHERE item.id_posla = transaction.id_posla
+                  AND item.eid_del_stavbe = $1
+              )
+              ORDER BY transaction.id_posla
+            `,
+            [request.params.id],
+          ),
+        ])) as [
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+          QueryResult<Record<string, unknown>>,
+        ];
+
+        const building = buildingResult.rows[0];
         return {
           ...entity,
-          relationships: {
-            building: {
-              id: entity.eidStavba,
-              href: `/gurs/buildings/${entity.eidStavba}`,
-            },
-            addresses: {
-              href: `/gurs/addresses?eidStavba=${entity.eidStavba}`,
-            },
-            parcels: {
-              href: `/gurs/parcels?eidStavba=${entity.eidStavba}`,
-            },
-            valuationUnits: relationship(
-              entity.valuationCount,
-              `/gurs/building-parts/${request.params.id}/valuation-units`,
+          building: building
+            ? serializeRow(building, buildings.numericFields)
+            : null,
+          addresses: addressResult.rows.map((row) =>
+            serializeRow(row, addresses.numericFields),
+          ),
+          parcels: parcelResult.rows.map((row) =>
+            serializeRow(row, parcels.numericFields),
+          ),
+          valuationUnits: valuationResult.rows.map((row) =>
+            serializeRow(
+              row,
+              numeric("special_circumstance_effect", "modelled_value"),
             ),
-            sales: relationship(
-              entity.saleCount,
-              `/gurs/transactions?eidDelStavbe=${request.params.id}`,
-            ),
-          },
+          ),
+          sales: saleResult.rows.map((row) =>
+            serializeRow(row, transactions.numericFields),
+          ),
         };
       },
     );

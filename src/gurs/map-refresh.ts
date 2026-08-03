@@ -15,7 +15,7 @@ export async function refreshMapTables(database: Queryable): Promise<void> {
   await database.query(`
     INSERT INTO map.properties (
       eid_stavba, ko_id, building_number, full_address, construction_year,
-      building_type_code, gross_floor_area, pin, footprint
+      building_type_code, gross_floor_area, modelled_value, pin, footprint
     )
     SELECT
       building.eid_stavba,
@@ -25,6 +25,7 @@ export async function refreshMapTables(database: Queryable): Promise<void> {
       building.construction_year,
       building.building_type_code,
       building.gross_floor_area::double precision,
+      valuation.modelled_value,
       COALESCE(
         CASE
           WHEN building.centroid_e IS NOT NULL AND building.centroid_n IS NOT NULL
@@ -58,6 +59,12 @@ export async function refreshMapTables(database: Queryable): Promise<void> {
       ORDER BY eid_hisna_stevilka
       LIMIT 1
     ) AS address ON true
+    LEFT JOIN LATERAL (
+      SELECT sum(unit.modelled_value)::double precision AS modelled_value
+      FROM public.gurs_kn_building_parts AS part
+      JOIN public.gurs_ev_building_part_units AS unit USING (eid_del_stavbe)
+      WHERE part.eid_stavba = building.eid_stavba
+    ) AS valuation ON true
     WHERE
       (building.centroid_e IS NOT NULL AND building.centroid_n IS NOT NULL)
       OR building.footprint_geometry IS NOT NULL
@@ -120,15 +127,23 @@ export async function refreshMapTables(database: Queryable): Promise<void> {
   `);
 
   await database.query(`
-    INSERT INTO map.parcels (eid_parcela, ko_id, parcel_number, area, geom)
+    INSERT INTO map.parcels (
+      eid_parcela, ko_id, parcel_number, area, modelled_value, geom
+    )
     SELECT
-      eid_parcela,
-      ko_id,
-      parcel_number,
-      area::double precision,
-      ST_SetSRID(ST_GeomFromGeoJSON(geometry), 4326)
-    FROM public.gurs_kn_parcels
-    WHERE geometry IS NOT NULL
+      parcel.eid_parcela,
+      parcel.ko_id,
+      parcel.parcel_number,
+      parcel.area::double precision,
+      valuation.modelled_value,
+      ST_SetSRID(ST_GeomFromGeoJSON(parcel.geometry), 4326)
+    FROM public.gurs_kn_parcels AS parcel
+    LEFT JOIN LATERAL (
+      SELECT sum(unit.modelled_value)::double precision AS modelled_value
+      FROM public.gurs_ev_parcel_units AS unit
+      WHERE unit.eid_parcela = parcel.eid_parcela
+    ) AS valuation ON true
+    WHERE parcel.geometry IS NOT NULL
   `);
 
   await database.query(`

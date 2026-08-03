@@ -83,10 +83,10 @@ GET /gurs/code-lists
 GET /gurs/search?q=Trubarjeva+10
 ```
 
-Every collection except statistics has `/:id` detail routes. Building, part,
-and parcel details include relationship counts and links for navigating their
-addresses, parts, parcels, valuation units, and sales. Transaction details
-include all ETN items and their resolved `eidDelStavbe`/`eidParcela`.
+Every collection except statistics has `/:id` detail routes. Building, building
+part, and parcel details embed their related records as objects and arrays.
+Transaction details include all ETN items and their resolved
+`eidDelStavbe`/`eidParcela`.
 
 Filters are explicitly whitelisted. Common examples are `koId`,
 `buildingTypeCode`, `areaMin`/`areaMax`,
@@ -105,7 +105,10 @@ GET /map/tiles/{layer}/{z}/{x}/{y}.mvt
 Layers are `properties`, `sales`, `parcels`, and `cadastral`. Properties and
 sales cluster through zoom 11 and become individual pins at zoom 12. Building
 footprints start at zoom 16, parcels at zoom 15, and cadastral boundaries at
-zoom 8. Tiles are always viewport-limited by `ST_TileEnvelope`.
+zoom 8. Individual building and parcel features include `modelled_value`,
+calculated as the sum of their valuation-unit values. Both layers accept
+`valuationValueMin` and `valuationValueMax` filters. Tiles are always
+viewport-limited by `ST_TileEnvelope`.
 
 MapLibre must attach the API key to tile requests as well:
 

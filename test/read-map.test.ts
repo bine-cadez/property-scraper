@@ -61,6 +61,216 @@ describe("read API", () => {
     expect(query).not.toHaveBeenCalled();
     await app.close();
   });
+
+  it("embeds all related arrays in building details", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            eid_stavba: "building-1",
+            gross_floor_area: "3073.2",
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            eid_hisna_stevilka: "address-1",
+            eid_stavba: "building-1",
+            centroid_e: "14.5",
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            eid_del_stavbe: "part-1",
+            eid_stavba: "building-1",
+            area: "72.4",
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ eid_parcela: "parcel-1", area: "500.5" }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ eid_del_stavbe: "part-1", modelled_value: "250000" }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id_posla: "sale-1", total_price: "275000" }],
+        rowCount: 1,
+      });
+    const end = vi.fn();
+    const app = buildApp(config, { query, end } as unknown as Pool);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/gurs/buildings/building-1",
+      headers,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      eidStavba: "building-1",
+      grossFloorArea: 3073.2,
+      addresses: [
+        {
+          eidHisnaStevilka: "address-1",
+          eidStavba: "building-1",
+          centroidE: 14.5,
+        },
+      ],
+      parts: [
+        {
+          eidDelStavbe: "part-1",
+          eidStavba: "building-1",
+          area: 72.4,
+        },
+      ],
+      parcels: [{ eidParcela: "parcel-1", area: 500.5 }],
+      valuationUnits: [
+        { eidDelStavbe: "part-1", modelledValue: 250000 },
+      ],
+      sales: [{ idPosla: "sale-1", totalPrice: 275000 }],
+    });
+    expect(response.json()).not.toHaveProperty("relationships");
+    expect(query).toHaveBeenCalledTimes(6);
+    for (const call of query.mock.calls) {
+      expect(call[1]).toEqual(["building-1"]);
+    }
+    expect(query.mock.calls[5]?.[0]).toContain("WHERE EXISTS");
+    await app.close();
+  });
+
+  it("embeds all related arrays in parcel details", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rows: [{ eid_parcela: "parcel-1", area: "500.5" }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ eid_stavba: "building-1", gross_floor_area: "3073.2" }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ parcel_unit_id: "unit-1", modelled_value: "100000" }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ eid_hisna_stevilka: "address-1", centroid_e: "14.5" }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ eid_del_stavbe: "part-1", area: "72.4" }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id_posla: "sale-1", total_price: "275000" }],
+        rowCount: 1,
+      });
+    const end = vi.fn();
+    const app = buildApp(config, { query, end } as unknown as Pool);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/gurs/parcels/parcel-1",
+      headers,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      eidParcela: "parcel-1",
+      area: 500.5,
+      buildings: [{ eidStavba: "building-1", grossFloorArea: 3073.2 }],
+      valuationUnits: [{ parcelUnitId: "unit-1", modelledValue: 100000 }],
+      addresses: [{ eidHisnaStevilka: "address-1", centroidE: 14.5 }],
+      parts: [{ eidDelStavbe: "part-1", area: 72.4 }],
+      sales: [{ idPosla: "sale-1", totalPrice: 275000 }],
+    });
+    expect(response.json()).not.toHaveProperty("relationships");
+    expect(query).toHaveBeenCalledTimes(6);
+    for (const call of query.mock.calls) {
+      expect(call[1]).toEqual(["parcel-1"]);
+    }
+    expect(query.mock.calls[5]?.[0]).toContain("WHERE EXISTS");
+    await app.close();
+  });
+
+  it("embeds related records in building-part details", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            eid_del_stavbe: "part-1",
+            eid_stavba: "building-1",
+            area: "72.4",
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ eid_stavba: "building-1", gross_floor_area: "3073.2" }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ eid_hisna_stevilka: "address-1", centroid_e: "14.5" }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ eid_parcela: "parcel-1", area: "500.5" }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ eid_del_stavbe: "part-1", modelled_value: "250000" }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id_posla: "sale-1", total_price: "275000" }],
+        rowCount: 1,
+      });
+    const end = vi.fn();
+    const app = buildApp(config, { query, end } as unknown as Pool);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/gurs/building-parts/part-1",
+      headers,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      eidDelStavbe: "part-1",
+      eidStavba: "building-1",
+      area: 72.4,
+      building: { eidStavba: "building-1", grossFloorArea: 3073.2 },
+      addresses: [{ eidHisnaStevilka: "address-1", centroidE: 14.5 }],
+      parcels: [{ eidParcela: "parcel-1", area: 500.5 }],
+      valuationUnits: [
+        { eidDelStavbe: "part-1", modelledValue: 250000 },
+      ],
+      sales: [{ idPosla: "sale-1", totalPrice: 275000 }],
+    });
+    expect(response.json()).not.toHaveProperty("relationships");
+    expect(query).toHaveBeenCalledTimes(6);
+    expect(query.mock.calls.map((call) => call[1])).toEqual([
+      ["part-1"],
+      ["building-1"],
+      ["building-1"],
+      ["building-1"],
+      ["part-1"],
+      ["part-1"],
+    ]);
+    expect(query.mock.calls[5]?.[0]).toContain("WHERE EXISTS");
+    await app.close();
+  });
 });
 
 describe("map API", () => {
@@ -81,6 +291,56 @@ describe("map API", () => {
     );
     expect(response.rawPayload).toHaveLength(0);
     expect(query).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("includes and filters the modelled value in parcel tiles", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [{ tile: Buffer.from([0x1a, 0x00]) }],
+      rowCount: 1,
+    });
+    const end = vi.fn();
+    const app = buildApp(config, { query, end } as unknown as Pool);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/map/tiles/parcels/15/17600/11500.mvt?valuationValueMin=100000",
+      headers,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(query.mock.calls[0]?.[0]).toContain("feature.modelled_value");
+    expect(query.mock.calls[0]?.[1]).toEqual([
+      15,
+      17600,
+      11500,
+      100000,
+    ]);
+    await app.close();
+  });
+
+  it("includes and filters the modelled value in building tiles", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [{ tile: Buffer.from([0x1a, 0x00]) }],
+      rowCount: 1,
+    });
+    const end = vi.fn();
+    const app = buildApp(config, { query, end } as unknown as Pool);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/map/tiles/properties/12/2200/1437.mvt?valuationValueMax=300000",
+      headers,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(query.mock.calls[0]?.[0]).toContain("feature.modelled_value");
+    expect(query.mock.calls[0]?.[1]).toEqual([
+      12,
+      2200,
+      1437,
+      300000,
+    ]);
     await app.close();
   });
 
