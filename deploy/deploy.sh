@@ -14,6 +14,12 @@ if [ -n "$api_container" ]; then
 fi
 
 compose pull api caddy
+
+# Apply forward-compatible database migrations from the new image before it
+# replaces the currently healthy API container. A migration failure aborts the
+# deployment while the previous API version remains online.
+compose run --rm --no-deps api node dist/db/migrate.js
+
 compose up -d --remove-orphans
 
 api_container="$(compose ps -q api)"
