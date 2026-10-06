@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
 import { assertListingSourceUrl, createListingFetcher, ingestListings, validateListingIngestOptions } from "./ingest.js";
-import type { ListingSourceAdapter, NormalizedListing } from "./types.js";
+import type { ListingFetchHtml, ListingSourceAdapter, NormalizedListing } from "./types.js";
 import axios from "axios";
 
 const listing: NormalizedListing = {
@@ -28,7 +28,10 @@ function database() {
   return { pool: { connect: vi.fn().mockResolvedValue(client) } as unknown as Pool, query, release };
 }
 function fetchPages(nextPageUrl: string | null = null) {
-  return vi.fn(async (url: string) => url.includes("search") ? JSON.stringify({ listingUrls: [listing.url], nextPageUrl }) : "detail");
+  return vi.fn<ListingFetchHtml>(async (request) => {
+    const url = typeof request === "string" ? request : request.url;
+    return url.includes("search") ? JSON.stringify({ listingUrls: [listing.url], nextPageUrl }) : "detail";
+  });
 }
 
 describe("listing imports", () => {
@@ -112,7 +115,9 @@ describe("listing imports", () => {
 
 describe("listing import boundaries", () => {
   it("defaults to accessible sources and rejects malformed options", () => {
-    expect(validateListingIngestOptions()).toEqual({ sources: ["bolha"], transactionTypes: ["sale", "rent"], maxPages: 1, maxListings: 50 });
+    expect(validateListingIngestOptions()).toEqual({ sources: ["re-max", "kw", "oglasnik"], transactionTypes: ["sale", "rent"], maxPages: 1, maxListings: 50 });
+    expect(validateListingIngestOptions({}, { LISTING_SOURCES: "bolha,re-max" }).sources).toEqual(["re-max", "bolha"]);
+    expect(() => validateListingIngestOptions({}, { LISTING_SOURCES: "bolha,missing" })).toThrow(/LISTING_SOURCES/);
     expect(() => validateListingIngestOptions({ sources: [] })).toThrow();
     expect(() => validateListingIngestOptions({ transactionTypes: ["sale", "sale"] })).toThrow();
     expect(() => validateListingIngestOptions({ maxPages: 0 })).toThrow();

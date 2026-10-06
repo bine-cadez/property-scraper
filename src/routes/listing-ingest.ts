@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { Pool } from "pg";
 import { ingestListings, validateListingIngestOptions, type ListingIngestOptions, type ListingIngestResult, type ListingIngestDependencies } from "../listings/ingest.js";
+import { listingSourceKeys } from "../listings/sources/index.js";
 
 export type ListingsIngest = (database: Pool, options?: ListingIngestOptions, dependencies?: ListingIngestDependencies) => Promise<ListingIngestResult>;
 
@@ -13,7 +14,7 @@ export function listingIngestRoutes(database: Pool, ingest: ListingsIngest = ing
         body: {
           type: "object", additionalProperties: true,
           properties: {
-            sources: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", enum: ["nepremicnine-net", "bolha", "si21"] }, description: "Defaults to available sources. Check /listings/sources for availability." },
+            sources: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", enum: listingSourceKeys }, description: "Defaults to sources enabled in /listings/sources, or LISTING_SOURCES when that variable is set." },
             transactionTypes: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", enum: ["sale", "rent"] }, default: ["sale", "rent"] },
             maxPages: { type: "integer", minimum: 1, maximum: 100, default: 1 },
             maxListings: { type: "integer", minimum: 1, maximum: 2000, default: 50 },

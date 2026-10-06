@@ -128,52 +128,91 @@ Set `CORS_ORIGINS` to a comma-separated allowlist (for example,
 ## House sale and rental advertisements
 
 Advertisement inventory is stored independently of GURS records and completed
-sales. The initial live source is **Bolha**, using Slovenia-only house sale and
-rental categories. Nepremicnine.net (priority 1) remains disabled pending a
-verified adapter and an agreement covering automated collection and reuse,
-as required by its [published terms](https://www.nepremicnine.net/pogoji-uporabe.html).
-Access tests were client-dependent: ordinary Python HTTP requests retrieved
-real sale and rental catalogues, while the app's Axios fetcher and Node's
-built-in fetch received access challenges. Browser fetching has not been
-established as necessary or reliable for production imports. Its
-[documented API](https://api.nepremicnine.net/docs/Nepremicnine.net%20API%20dokumentacija%20ent.pdf)
-requires an activated agency token and restricts use to agency applications;
-it does not establish a licence for a whole-market map. SI21 (priority 3)
-remains disabled without a verified adapter. Its [RSS help page](https://nepremicnine.si21.com/rss_feed/)
-exists, but the [public RSS endpoint](https://nepremicnine.si21.com/rss/)
-returned a valid, empty news feed during testing, with no property advertisements.
-Ordinary Python HTTP requests also retrieved its homepage and house catalogue;
-the earlier access challenge does not establish that all public access is blocked.
-`GET /listings/sources`
-reports source availability and the reason for each deferred source.
+sales. Each ad is normalized to asking price, price basis, floor area, land
+area, property type, sale or rent, location text, coordinates when the source
+publishes them, source URL, and `scraped_at`.
+
+Enabled by default:
+
+- **RE/MAX Slovenia** (`re-max`) reads the public search index at
+  `www.re-max.si`. `robots.txt` allows `/`. Requests stay on that host, use a
+  descriptive user agent, and pause between calls. The import keeps Slovenia
+  (`CountryID` 49) sale and rent rows that the site marks viewable. A street
+  is stored only when the listing marks the address public; otherwise
+  coordinates are labelled approximate. Photos are the public CDN URLs the
+  site already publishes.
+- **Keller Williams Slovenia** (`kw`) reads `https://kwslovenia.com/oglasi/prodaja`
+  and `/oglasi/oddaja`. `robots.txt` allows those pages and asks for
+  `Crawl-delay: 30`. The importer waits 30 seconds before every KW request.
+  Listing pages do not publish coordinates. Ads whose slug or heading is
+  outside Slovenia are omitted.
+- **Oglasnik.si** (`oglasnik`) reads the public WordPress RSS feed
+  `https://oglasnik.si/kategorija-oglasa/nepremicnine/feed/`. It is a recent
+  classifieds feed, not a full market catalogue. Price, area, and place are
+  taken from the article text. The feed mixes sale and rent, so a partial
+  import does not retire ads that were not in that page.
+
+`GET /listings/sources` reports every candidate and why a source is off.
+Set `LISTING_SOURCES=re-max,oglasnik` to change the default set without a
+code change. An explicit `--sources` list overrides that variable.
+
+These sources were checked and left out. None of them are fetched by the
+default import, and the client does not bypass challenges:
+
+- **Nepremicnine.net** returns a Cloudflare challenge, and its
+  [terms](https://www.nepremicnine.net/pogoji-uporabe.html) require a separate
+  agreement for automated collection. Its
+  [agency API](https://api.nepremicnine.net/docs/Nepremicnine.net%20API%20dokumentacija%20ent.pdf)
+  needs an activated token.
+- **Bolha** still has a house parser (`--sources=bolha`). A Cloudflare or
+  captcha response fails that catalogue and does not deactivate stored ads.
+  It is disabled unless selected because that access has been unreliable.
+- **SI21** allows crawling in `robots.txt`, but catalogue pages currently
+  return a Cloudflare challenge.
+- **Salomon nepremičnine** currently returns a Cloudflare challenge.
+- **remax.si** (without the hyphen) is not the RE/MAX agency site.
 
 Apply the database migration before importing:
 
 ```bash
 pnpm migrate:sql
-pnpm ingest:listings -- --sources=bolha --transaction-types=sale,rent --max-pages=1 --max-listings=50
+pnpm ingest:listings -- --dry-run --sources=re-max,oglasnik --transaction-types=sale,rent --max-pages=1 --max-listings=5
+pnpm ingest:listings -- --sources=re-max,oglasnik --transaction-types=sale,rent --max-pages=1 --max-listings=50
 ```
 
-The authenticated HTTP equivalent is:
+Keller Williams is included in the default source list. Because of its 30
+second crawl delay, a first look is cheaper with an explicit cap:
+
+```bash
+pnpm ingest:listings -- --dry-run --sources=kw --transaction-types=sale --max-pages=1 --max-listings=2
+```
+
+`--dry-run` prints normalized ads and does not open the database. The
+authenticated HTTP import is not a dry run:
 
 ```bash
 curl -X POST http://localhost:3000/ingest/listings \
   -H "content-type: application/json" \
   -H "x-api-key: $AUTH_KEY" \
-  -d '{"sources":["bolha"],"transactionTypes":["sale","rent"],"maxPages":1,"maxListings":50}'
+  -d '{"sources":["re-max","oglasnik"],"transactionTypes":["sale","rent"],"maxPages":1,"maxListings":50}'
 ```
 
-Imports default to available sources, both sale and rent, one search page, and
-50 detail requests per source and transaction type. Limits allow at most 100
-pages and 2,000 details per catalogue. Downloads run sequentially with a delay,
-timeouts, and bounded retries. Results report successes/failures, saved/skipped
-counts, location coverage, and whether the catalogue was complete. The CLI exits
-with a nonzero status if any catalogue fails; HTTP callers should inspect each
-summary's `status`.
+Imports default to enabled sources, both sale and rent, one page, and 50 ads
+per source and transaction type. Limits allow at most 100 pages and 2,000 ads
+per catalogue. Downloads run sequentially with a per-source delay, timeouts,
+and bounded retries. Results report successes/failures, saved/skipped counts,
+location coverage, cross-source duplicates, and whether the catalogue was
+complete. The CLI exits with a nonzero status if any catalogue fails; HTTP
+callers should inspect each summary's `status`.
 
 A stable `source:transactionType:sourceListingId` identifies each ad. Repeat
-imports update it, preserve `firstSeenAt`, and refresh `lastSeenAt`. Each
-catalogue commits atomically. An interrupted, capped, empty, or ambiguously
+imports update it, preserve `firstSeenAt`, and refresh `lastSeenAt` and
+`scrapedAt`. Ads that share a transaction, property type, rounded price, size,
+and place (coordinates to about 100 metres, or the location text when no
+coordinates exist) get the same `contentFingerprint`. The read API can hide
+the extra copies with `dedupe=true`; the preferred source is the one with the
+lower priority number. Ads without a price or a place are not grouped.
+Each catalogue commits atomically. An interrupted, capped, empty, or ambiguously
 parsed catalogue never deactivates unseen ads. Only a complete, nonempty import
 without skipped entries can mark missing ads inactive. Failed downloads leave
 that catalogue's prior inventory intact. Concurrent imports return HTTP 409.
@@ -191,8 +230,9 @@ GET /listings/map/tiles/rentals/{z}/{x}/{y}.mvt
 
 List pagination follows the existing `limit`/`cursor` convention (50 by default,
 200 maximum). Filters include `source`, `propertyType`, `priceUnit`,
-`priceMin`/`priceMax`, `areaMin`/`areaMax`, and WGS84 `bbox`. List routes default
-to `active=true`; use `active=false` for retired ads or `active=all` for both.
+`priceMin`/`priceMax`, `areaMin`/`areaMax`, WGS84 `bbox`, and `dedupe=true`.
+List routes default to `active=true`; use `active=false` for retired ads or
+`active=all` for both.
 Detail routes also retain inactive ads. Any price range requires `priceUnit`:
 
 ```text
@@ -226,9 +266,10 @@ docker compose up --build
 ```
 
 Kyrage tracks ordinary columns and tables; versioned raw SQL manages PostGIS,
-`pg_trgm`, geometry columns, and GiST indexes. SQL migration 006 also
-bootstraps advertisement storage so the production deployment can apply it
-without the development-only Kyrage CLI:
+`pg_trgm`, geometry columns, and GiST indexes. SQL migration 006 bootstraps
+advertisement storage, and 007 adds `scraped_at`, `content_fingerprint`, and
+`duplicate_of`, so the production deployment can apply them without the
+development-only Kyrage CLI:
 
 ```bash
 docker compose exec api pnpm migrate:generate

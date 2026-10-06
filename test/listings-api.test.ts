@@ -24,7 +24,11 @@ describe("advertisement read API", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().items).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: "nepremicnine-net", priority: 1, enabled: false }),
-      expect.objectContaining({ key: "bolha", priority: 2, enabled: true }),
+      expect.objectContaining({ key: "re-max", priority: 2, enabled: true }),
+      expect.objectContaining({ key: "bolha", priority: 3, enabled: false }),
+      expect.objectContaining({ key: "kw", priority: 4, enabled: true }),
+      expect.objectContaining({ key: "oglasnik", priority: 5, enabled: true }),
+      expect.objectContaining({ key: "salomon", priority: 7, enabled: false }),
     ]));
     expect(query).not.toHaveBeenCalled();
     await app.close();

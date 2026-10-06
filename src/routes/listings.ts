@@ -10,7 +10,7 @@ import {
   singleQueryValue,
   type QueryParameters,
 } from "../gurs/query.js";
-import { listingSources } from "../listings/sources/index.js";
+import { listingSourcesFor } from "../listings/sources/index.js";
 
 type ListingLayer = "sales" | "rentals";
 type TileParameters = { layer: string; z: string; x: string; y: string };
@@ -25,7 +25,8 @@ const columns = `
   feature.description, feature.location_text, feature.address, feature.price,
   feature.currency, feature.price_unit, feature.area_m2, feature.land_area_m2,
   feature.rooms, feature.latitude, feature.longitude, feature.location_accuracy,
-  feature.images, feature.first_seen_at, feature.last_seen_at, feature.updated_at,
+  feature.images, feature.content_fingerprint, feature.duplicate_of,
+  feature.first_seen_at, feature.last_seen_at, feature.scraped_at, feature.updated_at,
   feature.active
 `;
 
@@ -38,6 +39,7 @@ const filterProperties = {
   areaMin: { type: "string", description: "Minimum advertised floor/property area in square metres." },
   areaMax: { type: "string", description: "Maximum advertised floor/property area in square metres." },
   bbox: { type: "string", description: "WGS84 bounding box as minLon,minLat,maxLon,maxLat. Listings without coordinates are excluded when this filter is used." },
+  dedupe: { type: "string", enum: ["true", "false"], description: "When true, hide ads that match another saved ad on transaction, type, rounded price, size, and place. The preferred source is kept." },
 };
 
 const listQuerySchema = {
@@ -104,7 +106,7 @@ function listingFilters(
 
   const source = singleQueryValue(query, "source");
   if (source !== undefined) {
-    if (!listingSources.some((candidate) => candidate.key === source)) {
+    if (!listingSourcesFor().some((candidate) => candidate.key === source)) {
       throw new ApiValidationError("source must be a key from /listings/sources");
     }
     clauses.push(`feature.source = ${addValue(values, source)}`);
@@ -146,6 +148,11 @@ function listingFilters(
     }
     const coordinates = parseBbox(bbox).map((coordinate) => addValue(values, coordinate));
     clauses.push(`feature.geom && ST_MakeEnvelope(${coordinates.join(", ")}, 4326)`);
+  }
+  const dedupe = singleQueryValue(query, "dedupe");
+  if (dedupe !== undefined) {
+    if (dedupe !== "true" && dedupe !== "false") throw new ApiValidationError("dedupe must be true or false");
+    if (dedupe === "true") clauses.push("feature.duplicate_of IS NULL");
   }
   return clauses;
 }
@@ -220,7 +227,7 @@ export function listingRoutes(database: Pool): FastifyPluginAsync {
         "See available advertisement sources",
         "Returns source keys, priorities, and adapter availability. A disabled source is a candidate and does not contribute ads to automatic imports.",
       ),
-    }, async () => ({ items: listingSources }));
+    }, async () => ({ items: listingSourcesFor() }));
 
     for (const [layer, transaction] of [["sales", "sale"], ["rentals", "rent"]] as const) {
       app.get<{ Querystring: QueryParameters }>(`/listings/${layer}`, {
