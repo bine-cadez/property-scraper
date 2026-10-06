@@ -1,0 +1,49 @@
+name: Ingest listings
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: listing-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+    steps:
+      - name: Configure deployment SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.HETZNER_VM_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.HETZNER_VM_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/hetzner_deploy"
+          chmod 600 "$HOME/.ssh/hetzner_deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/hetzner_deploy" >/dev/null
+
+      - name: Refresh fast listing catalogues
+        env:
+          DEPLOY_HOST: ${{ secrets.HETZNER_VM_HOST }}
+          DEPLOY_USER: ${{ secrets.HETZNER_VM_USER }}
+        run: |
+          ssh -T -i "$HOME/.ssh/hetzner_deploy" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "sh -s" <<'EOF'
+          set -eu
+          container=$(docker ps -q \
+            --filter label=com.docker.compose.project=property-scraper \
+            --filter label=com.docker.compose.service=api)
+          count=$(printf '%s\n' "$container" | sed '/^$/d' | wc -l)
+          if [ "$count" -ne 1 ]; then
+            echo "Expected one running property-scraper api container, found ${count}" >&2
+            exit 1
+          fi
+          docker exec "$container" node dist/listings/scheduled.js
+          EOF

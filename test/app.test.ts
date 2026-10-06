@@ -94,6 +94,11 @@ describe("app", () => {
         "/ingest/gurs": {},
         "/gurs/parcels/{id}": {},
         "/map/tiles/{layer}/{z}/{x}/{y}.mvt": {},
+        "/ingest/listings": {},
+        "/listings/sources": {},
+        "/listings/sales": {},
+        "/listings/rentals": {},
+        "/listings/map/tiles/{layer}/{z}/{x}/{y}.mvt": {},
       },
     });
 
@@ -115,7 +120,7 @@ describe("app", () => {
         .map(([, operation]) => operation),
     );
 
-    expect(operations).toHaveLength(26);
+    expect(operations).toHaveLength(33);
     for (const operation of operations) {
       expect(operation.summary).toEqual(expect.any(String));
       expect(operation.description).toEqual(expect.any(String));

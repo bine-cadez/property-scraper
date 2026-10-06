@@ -125,6 +125,172 @@ const map = new maplibregl.Map({
 Set `CORS_ORIGINS` to a comma-separated allowlist (for example,
 `http://localhost:5173`). Use `*` only for a public deployment.
 
+## House sale and rental advertisements
+
+Advertisement inventory is stored independently of GURS records and completed
+sales. Each ad is normalized to asking price, price basis, floor area, land
+area, property type, sale or rent, location text, coordinates when the source
+publishes them, source URL, and `scraped_at`.
+
+Enabled by default:
+
+- **RE/MAX Slovenia** (`re-max`) reads the public search index at
+  `www.re-max.si`. `robots.txt` allows `/`. Requests stay on that host, use a
+  descriptive user agent, and pause between calls. The import keeps Slovenia
+  (`CountryID` 49) sale and rent rows that the site marks viewable. A street
+  is stored only when the listing marks the address public; otherwise
+  coordinates are labelled approximate. Photos are the public CDN URLs the
+  site already publishes.
+- **Keller Williams Slovenia** (`kw`) reads `https://kwslovenia.com/oglasi/prodaja`
+  and `/oglasi/oddaja`. `robots.txt` allows those pages and asks for
+  `Crawl-delay: 30`. The importer waits 30 seconds before every KW request.
+  Listing pages do not publish coordinates. Ads whose slug or heading is
+  outside Slovenia are omitted.
+- **Oglasnik.si** (`oglasnik`) reads the public WordPress RSS feed
+  `https://oglasnik.si/kategorija-oglasa/nepremicnine/feed/`. It is a recent
+  classifieds feed, not a full market catalogue. Price, area, and place are
+  taken from the article text. The feed mixes sale and rent, so a partial
+  import does not retire ads that were not in that page.
+
+`GET /listings/sources` reports every candidate and why a source is off.
+Set `LISTING_SOURCES=re-max,oglasnik` to change the default set without a
+code change. An explicit `--sources` list overrides that variable.
+
+These sources were checked and left out. None of them are fetched by the
+default import, and the client does not bypass challenges:
+
+- **Nepremicnine.net** returns a Cloudflare challenge, and its
+  [terms](https://www.nepremicnine.net/pogoji-uporabe.html) require a separate
+  agreement for automated collection. Its
+  [agency API](https://api.nepremicnine.net/docs/Nepremicnine.net%20API%20dokumentacija%20ent.pdf)
+  needs an activated token.
+- **Bolha** still has a house parser (`--sources=bolha`). A Cloudflare or
+  captcha response fails that catalogue and does not deactivate stored ads.
+  It is disabled unless selected because that access has been unreliable.
+- **SI21** allows crawling in `robots.txt`, but catalogue pages currently
+  return a Cloudflare challenge.
+- **Salomon nepremičnine** currently returns a Cloudflare challenge.
+- **remax.si** (without the hyphen) is not the RE/MAX agency site.
+
+Apply the database migration before importing:
+
+```bash
+pnpm migrate:sql
+pnpm ingest:listings -- --dry-run --sources=re-max,oglasnik --transaction-types=sale,rent --max-pages=1 --max-listings=5
+pnpm ingest:listings -- --sources=re-max,oglasnik --transaction-types=sale,rent --max-pages=1 --max-listings=50
+```
+
+Keller Williams is included in the default source list. Because of its 30
+second crawl delay, a first look is cheaper with an explicit cap:
+
+```bash
+pnpm ingest:listings -- --dry-run --sources=kw --transaction-types=sale --max-pages=1 --max-listings=2
+```
+
+`--dry-run` prints normalized ads and does not open the database. The
+authenticated HTTP import is not a dry run:
+
+```bash
+curl -X POST http://localhost:3000/ingest/listings \
+  -H "content-type: application/json" \
+  -H "x-api-key: $AUTH_KEY" \
+  -d '{"sources":["re-max","oglasnik"],"transactionTypes":["sale","rent"],"maxPages":1,"maxListings":50}'
+```
+
+Imports default to enabled sources, both sale and rent, one page, and 50 ads
+per source and transaction type. Limits allow at most 100 pages and 2,000 ads
+per catalogue. Downloads run sequentially with a per-source delay, timeouts,
+and bounded retries. Results report successes/failures, saved/skipped counts,
+location coverage, cross-source duplicates, and whether the catalogue was
+complete. The CLI exits with a nonzero status if any catalogue fails; HTTP
+callers should inspect each summary's `status`.
+
+A stable `source:transactionType:sourceListingId` identifies each ad. Repeat
+imports update it, preserve `firstSeenAt`, and refresh `lastSeenAt` and
+`scrapedAt`. Ads that share a transaction, property type, rounded price, size,
+and place (coordinates to about 100 metres, or the location text when no
+coordinates exist) get the same `contentFingerprint`. The read API can hide
+the extra copies with `dedupe=true`; the preferred source is the one with the
+lower priority number. Ads without a price or a place are not grouped.
+Each catalogue commits atomically. An interrupted, capped, empty, or ambiguously
+parsed catalogue never deactivates unseen ads. Only a complete, nonempty import
+without skipped entries can mark missing ads inactive. Failed downloads leave
+that catalogue's prior inventory intact. Concurrent imports return HTTP 409.
+
+### Five-minute refresh
+
+`.github/workflows/ingest-listings.yml` runs every five minutes (`*/5 * * * *`,
+UTC) after this workflow is on the default branch. GitHub runs scheduled
+workflows from the default branch only. The job SSHs to the production VM with
+the same secrets as deployment and executes `node dist/listings/scheduled.js`
+inside the running API container:
+
+- `HETZNER_VM_SSH_KEY`
+- `HETZNER_VM_KNOWN_HOSTS`
+- `HETZNER_VM_HOST`
+- `HETZNER_VM_USER`
+
+No extra database secret is required. The container already has `DATABASE_URL`
+from `/opt/property-scraper/.env`. The compose project name must stay
+`property-scraper` and the API service name `api`, which is what
+`deploy/deploy.sh` starts. Disable the workflow from the Actions tab to stop
+the schedule. `workflow_dispatch` runs the same command once.
+
+The scheduled pass is an incremental refresh, not a full-market crawl:
+
+- sources are `re-max` and `oglasnik` only
+- one page and at most 25 ads per source and transaction type
+- RE/MAX requests pause 1.5 seconds; this pass is a handful of requests
+- Keller Williams is not included, because its 30 second crawl delay cannot
+  finish inside five minutes. Run it separately, for example
+  `pnpm ingest:listings -- --sources=kw --transaction-types=sale,rent --max-pages=1 --max-listings=10`
+- the page is capped, so ads missing from that slice stay active
+
+Locally, the same command is `pnpm ingest:listings:scheduled`. It needs
+`DATABASE_URL` (and the listing migration). If another import holds the
+database lock, the scheduled run logs a skip and exits successfully. A failed
+catalogue still exits nonzero. The job times out after four minutes so a hung
+download does not pile onto the next slot.
+
+```text
+GET /listings/sources
+GET /listings/sales
+GET /listings/sales/{id}
+GET /listings/rentals
+GET /listings/rentals/{id}
+GET /listings/map/tiles/sales/{z}/{x}/{y}.mvt
+GET /listings/map/tiles/rentals/{z}/{x}/{y}.mvt
+```
+
+List pagination follows the existing `limit`/`cursor` convention (50 by default,
+200 maximum). Filters include `source`, `propertyType`, `priceUnit`,
+`priceMin`/`priceMax`, `areaMin`/`areaMax`, WGS84 `bbox`, and `dedupe=true`.
+List routes default to `active=true`; use `active=false` for retired ads or
+`active=all` for both.
+Detail routes also retain inactive ads. Any price range requires `priceUnit`:
+
+```text
+/listings/sales?propertyType=house&priceUnit=total&priceMax=400000
+/listings/rentals?priceUnit=month&priceMax=1500
+```
+
+Prices are asking prices. Rental periods absent from the source remain
+`priceUnit=unknown` and will not match a monthly-price filter. Missing prices,
+areas, or coordinates remain null. Coordinates carry `locationAccuracy`
+(`exact`, `approximate`, or `unknown`); the seller's profile address is never
+used as the property's address. Ads without coordinates remain in the read API
+and are omitted from map tiles.
+
+Map source-layers are **`listing_sales`** and **`listing_rentals`**, separate
+from the existing GURS `sales` layer. Zooms 0–11 return clusters with
+`cluster_count`; zoom 12 onward returns pins with `id`, `source`, `url`,
+`asking_price`, `currency`, `price_unit`, `property_type`, and
+`location_accuracy`. All tiles show active ads, are viewport-limited by
+`ST_TileEnvelope`, and accept the list filters above except `active`, `cursor`,
+and `limit`. Attach `x-api-key` as for the existing map API. Clients can style
+sale and rental source-layers separately and use an ad's `id` for its detail
+endpoint.
+
 ## Docker
 
 Run the API and PostGIS 17 with:
@@ -133,16 +299,19 @@ Run the API and PostGIS 17 with:
 docker compose up --build
 ```
 
-Kyrage manages ordinary columns and tables; versioned raw SQL manages PostGIS,
-`pg_trgm`, geometry columns, and GiST indexes:
+Kyrage tracks ordinary columns and tables; versioned raw SQL manages PostGIS,
+`pg_trgm`, geometry columns, and GiST indexes. SQL migration 006 bootstraps
+advertisement storage, and 007 adds `scraped_at`, `content_fingerprint`, and
+`duplicate_of`, so the production deployment can apply them without the
+development-only Kyrage CLI:
 
 ```bash
 docker compose exec api pnpm migrate:generate
 docker compose exec api pnpm migrate:apply
 ```
 
-`migrate:apply` applies Kyrage first and then the idempotent SQL files under
-`migrations/sql`. To apply only the spatial SQL migrations, run
+`migrate:apply` applies Kyrage first and then any unapplied SQL files under
+`migrations/sql`. To apply only the SQL migrations, run
 `pnpm migrate:sql`.
 
 The `Dockerfile` also contains a minimal `production` target:

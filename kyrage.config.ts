@@ -303,6 +303,54 @@ const etnCodeLists = defineTable(
   ],
 );
 
+// Spatial columns and CHECK constraints are managed by SQL migration 006.
+const propertyListings = defineTable(
+  "property_listings",
+  {
+    id: column("text", { primaryKey: true }),
+    source: column("text", { notNull: true }),
+    source_listing_id: column("text", { notNull: true }),
+    url: column("text", { notNull: true }),
+    transaction_type: column("text", { notNull: true }),
+    property_type: column("text", { notNull: true }),
+    title: column("text", { notNull: true }),
+    description: column("text"),
+    location_text: column("text"),
+    address: column("text"),
+    price: column("numeric"),
+    currency: column("text", { notNull: true, defaultSql: "'EUR'" }),
+    price_unit: column("text", { notNull: true, defaultSql: "'unknown'" }),
+    area_m2: column("numeric"),
+    land_area_m2: column("numeric"),
+    rooms: column("numeric"),
+    latitude: column("double precision"),
+    longitude: column("double precision"),
+    location_accuracy: column("text", {
+      notNull: true,
+      defaultSql: "'unknown'",
+    }),
+    images: column("jsonb", { notNull: true, defaultSql: "'[]'::jsonb" }),
+    first_seen_at: column("timestamptz", {
+      notNull: true,
+      defaultSql: "CURRENT_TIMESTAMP",
+    }),
+    last_seen_at: column("timestamptz", {
+      notNull: true,
+      defaultSql: "CURRENT_TIMESTAMP",
+    }),
+    updated_at: column("timestamptz", {
+      notNull: true,
+      defaultSql: "CURRENT_TIMESTAMP",
+    }),
+    active: column("boolean", { notNull: true, defaultSql: "true" }),
+  },
+  ({ index, unique }) => [
+    unique(["source", "source_listing_id", "transaction_type"]),
+    index(["transaction_type", "active", "id"]),
+    index(["source", "last_seen_at"]),
+  ],
+);
+
 export default defineConfig({
   database: {
     dialect: "postgres",
@@ -324,5 +372,6 @@ export default defineConfig({
     etnBuildingParts,
     etnLand,
     etnCodeLists,
+    propertyListings,
   ],
 });

@@ -12,7 +12,7 @@ type OperationDocumentation = {
 const paragraphs = (...values: string[]): string => values.join("\n\n");
 
 const apiDescription = paragraphs(
-  "This API lets you explore property information published by **GURS**, the Surveying and Mapping Authority of the Republic of Slovenia. You can look up land, buildings, parts of buildings, official modelled values, and recorded property sales.",
+  "This API lets you explore property information published by **GURS**, the Surveying and Mapping Authority of the Republic of Slovenia. You can look up land, buildings, parts of buildings, official modelled values, and recorded property sales. Separate `/listings` endpoints provide house advertisements offered for sale and rent, with asking prices and source links.",
   "### A few words that make the data easier to understand",
   "- A **cadastral municipality** is an official land-registration area. It is not necessarily the same thing as a local-government municipality.\n- A **parcel** is an officially registered piece of land.\n- A **building** is the whole registered structure.\n- A **building part** is a separately identified unit inside a building, such as a flat, office, shop, storage room, or parking space.\n- A **valuation unit** contains a GURS modelled value. This is an official estimate, not an asking price or a guaranteed current market price.\n- A **transaction** is a recorded property deal. One transaction can include several building parts or parcels, so its total price may cover more than one item.",
   "### How to use these pages",
@@ -163,6 +163,7 @@ const operationDocumentation: Record<string, OperationDocumentation> = {
 
 function tagFor(url: string): string {
   if (url.startsWith("/ingest/")) return "Ingestion";
+  if (url.startsWith("/listings/")) return "Listings";
   if (url.startsWith("/gurs/")) return "GURS";
   if (url.startsWith("/map/")) return "Map";
   return "System";
@@ -242,12 +243,16 @@ export function registerSwagger(app: FastifyInstance): void {
         },
         {
           name: "Ingestion",
-          description: "Refreshes the locally stored sample from GURS",
+          description: "Imports GURS data and property advertisements",
         },
         {
           name: "GURS",
           description:
             "Searches and explains Slovenian property, value, and sale records",
+        },
+        {
+          name: "Listings",
+          description: "Sale and rental advertisements, source availability, and separate map layers",
         },
         {
           name: "Map",
