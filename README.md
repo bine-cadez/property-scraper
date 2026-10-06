@@ -216,7 +216,41 @@ Each catalogue commits atomically. An interrupted, capped, empty, or ambiguously
 parsed catalogue never deactivates unseen ads. Only a complete, nonempty import
 without skipped entries can mark missing ads inactive. Failed downloads leave
 that catalogue's prior inventory intact. Concurrent imports return HTTP 409.
-There is no automatic refresh schedule; run the CLI or HTTP import when needed.
+
+### Five-minute refresh
+
+`.github/workflows/ingest-listings.yml` runs every five minutes (`*/5 * * * *`,
+UTC) after this workflow is on the default branch. GitHub runs scheduled
+workflows from the default branch only. The job SSHs to the production VM with
+the same secrets as deployment and executes `node dist/listings/scheduled.js`
+inside the running API container:
+
+- `HETZNER_VM_SSH_KEY`
+- `HETZNER_VM_KNOWN_HOSTS`
+- `HETZNER_VM_HOST`
+- `HETZNER_VM_USER`
+
+No extra database secret is required. The container already has `DATABASE_URL`
+from `/opt/property-scraper/.env`. The compose project name must stay
+`property-scraper` and the API service name `api`, which is what
+`deploy/deploy.sh` starts. Disable the workflow from the Actions tab to stop
+the schedule. `workflow_dispatch` runs the same command once.
+
+The scheduled pass is an incremental refresh, not a full-market crawl:
+
+- sources are `re-max` and `oglasnik` only
+- one page and at most 25 ads per source and transaction type
+- RE/MAX requests pause 1.5 seconds; this pass is a handful of requests
+- Keller Williams is not included, because its 30 second crawl delay cannot
+  finish inside five minutes. Run it separately, for example
+  `pnpm ingest:listings -- --sources=kw --transaction-types=sale,rent --max-pages=1 --max-listings=10`
+- the page is capped, so ads missing from that slice stay active
+
+Locally, the same command is `pnpm ingest:listings:scheduled`. It needs
+`DATABASE_URL` (and the listing migration). If another import holds the
+database lock, the scheduled run logs a skip and exits successfully. A failed
+catalogue still exits nonzero. The job times out after four minutes so a hung
+download does not pile onto the next slot.
 
 ```text
 GET /listings/sources
