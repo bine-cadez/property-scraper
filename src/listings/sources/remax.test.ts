@@ -55,6 +55,10 @@ describe("RE/MAX Slovenia adapter", () => {
       latitude: null, longitude: null, locationAccuracy: "unknown",
     });
     expect(normalizeRemaxListing({ ...rent, HidePricePublic: true }, "rent", 49)).toMatchObject({ price: null, priceUnit: "unknown" });
+    expect(normalizeRemaxListing({
+      ...rent,
+      ShortLinks: [{ LanguageCode: "sl-SI", ShortLink: "sl-si/nepremicninski-oglasi/kmetije-posestva/prodamo/velika-nedelja/1" }],
+    }, "rent", 49)?.propertyType).toBe("land");
   });
 
   it("pages the Slovenia search index and stops when the caller caps listings", async () => {
@@ -65,5 +69,7 @@ describe("RE/MAX Slovenia adapter", () => {
     const catalogue = await remaxAdapter.readCatalogue!("rent", { maxPages: 1, maxListings: 1 }, fetchText as never);
     expect(catalogue).toMatchObject({ pages: 1, complete: false, listings: [expect.objectContaining({ sourceListingId: "490321062-335" })] });
     expect(fetchText).toHaveBeenCalledTimes(2);
+    const search = fetchText.mock.calls.map(([request]) => request).find((request) => String(request.url).includes("/search"));
+    expect(String(search && "body" in search ? search.body : "")).toContain("content/LastUpdatedOnWeb desc");
   });
 });

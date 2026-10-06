@@ -13,7 +13,7 @@ import type {
 const feedUrl = "https://oglasnik.si/kategorija-oglasa/nepremicnine/feed/";
 
 function plain(html: string): string {
-  return load(html).text().replace(/\s+/g, " ").trim();
+  return load(html.replace(/<br\s*\/?>/gi, "\n")).text().replace(/[^\S\n]+/g, " ").replace(/ *\n */g, "\n").trim();
 }
 
 function classify(title: string, body: string): ListingTransactionType | null {
@@ -27,7 +27,7 @@ function classify(title: string, body: string): ListingTransactionType | null {
 }
 
 function matchPropertyType(value: string): ListingPropertyType | null {
-  if (/garaž|garaz|parkir/i.test(value)) return "garage";
+  if (/garaž|garaz/i.test(value)) return "garage";
   if (/poslov|pisarn|lokal|skladi/i.test(value)) return "commercial";
   if (/zemlji|parcel|posest/i.test(value)) return "land";
   if (/hiš|hisa/i.test(value)) return "house";
@@ -36,18 +36,20 @@ function matchPropertyType(value: string): ListingPropertyType | null {
 }
 
 function propertyType(title: string, body: string): ListingPropertyType {
-  return matchPropertyType(title)
-    ?? matchPropertyType(body.replace(/velikost zemljišč\w*|velikost zemljisc\w*/gi, " "))
-    ?? "other";
+  if (/\bparkirn/i.test(title) && !/hiš|hisa|stanovan|\bsob[aeo]\b/i.test(title)) return "garage";
+  if (/\bsob[aeo]\b/i.test(title) && !/hiš|hisa/i.test(title)) return "apartment";
+  const plotLabel = body.replace(/velikost zemljišč\w*|velikost zemljisc\w*|parkirn\w*/gi, " ");
+  return matchPropertyType(title) ?? matchPropertyType(plotLabel) ?? "other";
 }
 
-function priceUnit(transactionType: ListingTransactionType, tail: string, body: string): ListingPriceUnit {
-  const text = `${tail} ${body}`;
-  if (/m\s*(?:2|²)|\/\s*m/i.test(tail)) return "m2";
-  if (/mesec|mese[cč]n/i.test(text)) return "month";
-  if (/teden/i.test(text)) return "week";
-  if (/dnevn/i.test(text)) return "day";
-  return transactionType === "sale" ? "total" : "unknown";
+function priceUnit(transactionType: ListingTransactionType, tail: string, hasPrice: boolean): ListingPriceUnit {
+  if (!hasPrice) return "unknown";
+  if (/m\s*(?:2|²)/i.test(tail)) return "m2";
+  if (transactionType === "sale") return "total";
+  if (/mesec|mese[cč]n/i.test(tail)) return "month";
+  if (/teden/i.test(tail)) return "week";
+  if (/dnevn/i.test(tail)) return "day";
+  return "unknown";
 }
 
 export function normalizeOglasnikItem(xml: string, requestedType: ListingTransactionType): NormalizedListing | null {
@@ -93,7 +95,7 @@ export function normalizeOglasnikItem(xml: string, requestedType: ListingTransac
     address: null,
     price: priceMatch?.[1] ? parseAmount(priceMatch[1]) : null,
     currency: "EUR",
-    priceUnit: priceUnit(requestedType, priceMatch?.[2] ?? "", body),
+    priceUnit: priceUnit(requestedType, priceMatch?.[2] ?? "", Boolean(priceMatch?.[1])),
     areaM2: parseAmount(areaMatch?.[1] ?? null),
     landAreaM2: parseAmount(landMatch?.[1] ?? null),
     rooms: null,

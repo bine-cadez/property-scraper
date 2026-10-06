@@ -57,7 +57,7 @@ function propertyType(links: JsonObject[], listingClass: number | null): Listing
   const slug = parts[parts.indexOf("nepremicninski-oglasi") + 1] ?? "";
   const fromSlug: Record<string, ListingPropertyType> = {
     stanovanje: "apartment", apartma: "apartment", hisa: "house", vila: "house", dvojcek: "house",
-    zemljisce: "land", parcela: "land", kmetija: "land", garaza: "garage", "parkirno-mesto": "garage",
+    zemljisce: "land", parcela: "land", kmetija: "land", "kmetije-posestva": "land", garaza: "garage", "parkirno-mesto": "garage",
     pisarna: "commercial", "poslovni-prostor": "commercial", lokal: "commercial", restavracija: "commercial",
     skladisce: "commercial", hotel: "commercial", drugo: "other", soba: "other",
   };
@@ -175,7 +175,7 @@ async function readRemaxCatalogue(
     const body = {
       count: true, skip, top,
       filter: `content/TenantId eq ${tenantId} and content/CountryID eq ${countryId} and content/MacroRegionId eq ${regionId} and content/OnHoldListing eq false and content/IsViewable eq true and content/TransactionTypeUID eq ${transaction}`,
-      orderby: "content/ListingKey asc",
+      orderby: "content/LastUpdatedOnWeb desc, content/ListingPriceEuro asc",
       select: selectedFields,
     };
     const payload = object(JSON.parse(await fetchText({
@@ -200,7 +200,7 @@ async function readRemaxCatalogue(
     if (skip >= total) break;
   }
   const listings = [...found.values()];
-  const complete = total !== null && skip >= total && !capped && skipped === 0 && listings.length > 0;
+  const complete = total !== null && listings.length === total && !capped && skipped === 0;
   return { listings, pages, skipped, complete };
 }
 

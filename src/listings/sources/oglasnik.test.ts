@@ -31,6 +31,24 @@ describe("Oglasnik RSS adapter", () => {
     expect(normalizeOglasnikItem(item, "rent")).toBeNull();
   });
 
+  it("reads a line-broken sale that names monthly costs but does not state a price", () => {
+    const live = `
+<item>
+  <title>PRODAJA HIŠE</title>
+  <link>https://oglasnik.si/oglasi/prodaja-hise/</link>
+  <guid>https://oglasnik.si/?post_type=ad_listing&amp;p=30413</guid>
+  <content:encoded><![CDATA[<p>Hiša ima garažo in poslovni del.</p>
+  <p>Lokacija: Selnica ob Dravi<br />
+  Uporabna površina: 181 m2<br />
+  Velikost zemljišča: 625 m2</p>
+  <p>Mesečni stroški vključno z ogrevanjem so nizki.</p>]]></content:encoded>
+</item>`;
+    expect(normalizeOglasnikItem(live, "sale")).toMatchObject({
+      propertyType: "house", price: null, priceUnit: "unknown",
+      areaM2: 181, landAreaM2: 625, locationText: "Selnica ob Dravi",
+    });
+  });
+
   it("joins split price digits and treats an explicit monthly rent as monthly", () => {
     expect(normalizeOglasnikItem(rent, "rent")).toMatchObject({
       sourceListingId: "30637", transactionType: "rent", propertyType: "apartment",

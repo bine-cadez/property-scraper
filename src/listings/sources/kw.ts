@@ -102,12 +102,16 @@ export const kwAdapter: ListingSourceAdapter = {
     if (!id) throw new Error("KW listing page could not be parsed (invalid listing identity)");
     const kind = field(page, "Vrsta nepremičnine") ?? page(".property-type").first().text().trim();
     const priceText = page(".price").first().text().replace(/\s+/g, " ").trim();
+    const seenImages = new Set<string>();
     const images = page("a.media-item[href], .pzl-media img[src], .pzl-media img[data-src]").toArray().flatMap((element) => {
       const href = page(element).attr("href") ?? page(element).attr("data-src") ?? page(element).attr("src");
       if (!href) return [];
       try {
         const image = new URL(href, url);
-        return image.protocol === "https:" ? [image.toString()] : [];
+        const identity = `${image.origin}${image.pathname}`;
+        if (image.protocol !== "https:" || seenImages.has(identity)) return [];
+        seenImages.add(identity);
+        return [image.toString()];
       } catch { return []; }
     });
     const description = page(".description").text().replace(/\s+/g, " ").trim() || null;

@@ -18,6 +18,7 @@ const sale = `
   <li><span>Velikost (neto):</span> <strong>254.9 m<sup>2</sup></strong></li>
   <li><span>Parcela:</span> <strong>596 m<sup>2</sup></strong></li></ul>
   <a class="media-item" href="https://bunny.100m2.si/item/202/a.jpg">photo</a>
+  <a class="media-item" href="https://bunny.100m2.si/item/202/a.jpg?class=thumb">thumb</a>
 `;
 
 describe("Keller Williams Slovenia adapter", () => {
