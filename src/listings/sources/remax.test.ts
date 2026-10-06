@@ -70,6 +70,25 @@ describe("RE/MAX Slovenia adapter", () => {
     expect(catalogue).toMatchObject({ pages: 1, complete: false, listings: [expect.objectContaining({ sourceListingId: "490321062-335" })] });
     expect(fetchText).toHaveBeenCalledTimes(2);
     const search = fetchText.mock.calls.map(([request]) => request).find((request) => String(request.url).includes("/search"));
-    expect(String(search && "body" in search ? search.body : "")).toContain("content/LastUpdatedOnWeb desc");
+    const body = String(search && "body" in search ? search.body : "");
+    expect(body).toContain("content/LastUpdatedOnWeb desc");
+    expect(body).not.toContain("LastUpdatedOnWeb ge");
+  });
+
+  it("keeps ads updated inside the lookback and stops when the index steps past it", async () => {
+    const cutoff = new Date("2026-07-06T00:00:00.000Z");
+    const recent = { ...rent, LastUpdatedOnWeb: Math.floor(Date.parse("2026-10-01T00:00:00.000Z") / 1000) };
+    const older = { ...rent, MLSID: "490321062-1", LastUpdatedOnWeb: Math.floor(Date.parse("2026-01-01T00:00:00.000Z") / 1000) };
+    const fetchText = vi.fn(async (request: { url: string; body?: string }) => {
+      if (request.url.endsWith("/settings.json")) return JSON.stringify({ CountryCode: "SI", CountryID: "49", TenantID: "6", MacroRegionID: "49" });
+      return JSON.stringify({ "@odata.count": 2, value: [{ content: recent }, { content: older }] });
+    });
+    const catalogue = await remaxAdapter.readCatalogue!("rent", { maxPages: 5, maxListings: 100, publishedAfter: cutoff }, fetchText as never);
+    expect(catalogue.listings.map((listing) => listing.sourceListingId)).toEqual(["490321062-335"]);
+    expect(catalogue).toMatchObject({ reachedLookback: true, lookbackApplied: true, complete: false, outsideLookback: 1, pages: 1 });
+    const search = fetchText.mock.calls.map(([request]) => request).find((request) => String(request.url).includes("/search"));
+    const body = String(search && "body" in search ? search.body : "");
+    expect(body).toContain(`content/LastUpdatedOnWeb ge ${Math.floor(cutoff.getTime() / 1000)}`);
+    expect(fetchText).toHaveBeenCalledTimes(2);
   });
 });

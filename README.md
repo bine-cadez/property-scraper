@@ -257,6 +257,75 @@ host run exits successfully when the refresh lock is already held. A failed
 catalogue still exits nonzero. The host script stops a hung download after
 four minutes so it does not pile onto the next slot.
 
+### Historical backfill
+
+The five-minute job only refreshes the newest page. It does not load older
+ads. `.github/workflows/backfill-listings.yml` is a manual
+`workflow_dispatch` (no cron) that SSHs to the same host and runs
+`node dist/listings/backfill.js` in the API container. It shares the
+`listing-ingest` concurrency group with the manual ingest workflow, and the
+same Postgres advisory lock as the VM cron, so a refresh skips while a
+backfill holds the lock. Deploy the commit that contains
+`dist/listings/backfill.js` before dispatching the workflow; the container
+runs the image that is already on the VM.
+
+Default lookback is **3 calendar months** (UTC, inclusive of the boundary
+day). `--lookback-days` is an alternative to `--months` (1–36 months, or
+1–1100 days). Defaults also walk `re-max`, `kw`, and `oglasnik` for both
+`sale` and `rent`, up to 200 pages and 5,000 ads per source and transaction
+type. `LISTING_SOURCES` is ignored here so a narrower API default cannot drop
+Keller Williams. Disabled sources, including Bolha, are rejected. This command
+does not turn them on and does not bypass Cloudflare.
+
+```bash
+pnpm ingest:listings:backfill -- --months=3 --sources=re-max,kw,oglasnik --transaction-types=sale,rent
+pnpm ingest:listings:backfill -- --lookback-days=90 --sources=re-max --transaction-types=sale --max-pages=2 --max-listings=50
+```
+
+On the VM, after the new image is deployed:
+
+```bash
+ssh deploy@46.224.27.216
+container=$(docker ps -q --filter label=com.docker.compose.project=property-scraper --filter label=com.docker.compose.service=api)
+docker exec "$container" node dist/listings/backfill.js --months=3 --sources=re-max,kw,oglasnik --transaction-types=sale,rent
+```
+
+Upserts use the same `source:transactionType:sourceListingId` key as the
+scheduled import. `first_seen_at` is kept. A re-run updates the same rows.
+Backfill never marks unseen ads inactive; a date window is not a full
+catalogue. Each page commits on its own, so a stop keeps earlier pages.
+SIGINT, SIGTERM, and SIGHUP finish the current request and exit 0. Progress
+is JSON on stderr (`fetched`, `inserted`, `updated`, `skipped`, `errors`,
+`reachedLookback`, `lookbackApplied`, `catalogueExhausted`). A failed source
+is recorded and the next source still runs. Exit code 1 means at least one
+source failed.
+
+GitHub-hosted jobs cannot run longer than 6 hours (`timeout-minutes: 360`).
+Keller Williams' 30 second crawl delay applies to every search page and every
+detail page inside the window, so a 3 month KW walk can take several hours
+and a wider window may not finish in Actions. Run that case in the foreground
+on the VM (the command above). To leave SSH, start it under `nohup` and stop
+it by signalling that `docker exec` process. Do not kill every `node` process
+on the container; the API is also Node.
+
+Source limits, checked against the public catalogues in October 2026:
+
+- **RE/MAX** has no archive of ads that have left the site. The public index
+  is viewable Slovenia ads ordered by `LastUpdatedOnWeb` (unix seconds).
+  Backfill adds `LastUpdatedOnWeb ge <cutoff>` and pages 25 at a time. The
+  index then held about 1,267 sale and 242 rent ads; the oldest still-viewable
+  sale had been updated in 2018. A 3 month window is a few hundred current
+  sale ads, not delisted history.
+- **Keller Williams** publishes a date on each catalogue card and lists
+  newest-first. Backfill stops when that date is before the cutoff and does
+  not download older detail pages. Sale had 54 pages and rent 8 (about 9 ads
+  per page). There is no second archive of removed ads. The 30 second delay
+  still applies.
+- **Oglasnik** is a short WordPress RSS feed with `pubDate`. The live feed had
+  two items, and page 2 returned HTTP 404. Backfill keeps in-window items and
+  treats that 404 as the end of the feed. It cannot invent months the feed no
+  longer publishes. A 404 does not retire ads already stored.
+
 ```text
 GET /listings/sources
 GET /listings/sales

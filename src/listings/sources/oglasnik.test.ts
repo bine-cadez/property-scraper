@@ -61,4 +61,36 @@ describe("Oglasnik RSS adapter", () => {
     const catalogue = await oglasnikAdapter.readCatalogue!("sale", { maxPages: 2, maxListings: 10 }, fetchText as never);
     expect(catalogue).toMatchObject({ pages: 1, skipped: 1, complete: false, listings: [expect.objectContaining({ sourceListingId: "30413" })] });
   });
+
+  it("keeps in-window RSS items and does not request the next page after an older pubDate", async () => {
+    const recent = item.replace("</item>", "<pubDate>Thu, 01 Oct 2026 00:00:00 +0000</pubDate></item>");
+    const older = item
+      .replace("30413", "10001")
+      .replace("prodaja-hise/", "stara-hisa/")
+      .replace("</item>", "<pubDate>Thu, 01 Jan 2026 00:00:00 +0000</pubDate></item>");
+    const fetchText = vi.fn(async (request: { url: string }) => {
+      if (request.url.includes("paged=")) throw new Error("next page should not be fetched");
+      return `<rss><channel>${recent}${older}</channel></rss>`;
+    });
+    const catalogue = await oglasnikAdapter.readCatalogue!("sale", {
+      maxPages: 4, maxListings: 20, publishedAfter: new Date("2026-07-06T00:00:00.000Z"),
+    }, fetchText as never);
+    expect(catalogue.listings.map((listing) => listing.sourceListingId)).toEqual(["30413"]);
+    expect(catalogue).toMatchObject({ pages: 1, reachedLookback: true, lookbackApplied: true, complete: false, outsideLookback: 1 });
+    expect(fetchText).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a later HTTP 404 as the end of the feed without calling that archive complete", async () => {
+    const fullPage = Array.from({ length: 10 }, (_, index) => item
+      .replace("30413", String(40_000 + index))
+      .replace("/oglasi/prodaja-hise/", `/oglasi/prodaja-hise-${index}/`)).join("");
+    const fetchText = vi.fn(async (request: { url: string }) => {
+      if (request.url.includes("paged=2")) throw new Error("Oglasnik.si returned HTTP 404");
+      return `<rss><channel>${fullPage}</channel></rss>`;
+    });
+    const catalogue = await oglasnikAdapter.readCatalogue!("sale", { maxPages: 3, maxListings: 50 }, fetchText as never);
+    expect(catalogue).toMatchObject({ pages: 1, exhausted: true, complete: false, listings: expect.any(Array) });
+    expect(catalogue.listings).toHaveLength(10);
+    expect(fetchText).toHaveBeenCalledTimes(2);
+  });
 });

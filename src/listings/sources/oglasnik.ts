@@ -1,7 +1,9 @@
 import { load } from "cheerio";
 import { parseAmount } from "../amount.js";
+import { isListingImportStopped, throwIfListingImportStopped } from "../stop.js";
 import type {
   ListingCatalogue,
+  ListingCatalogueLimits,
   ListingFetchHtml,
   ListingPriceUnit,
   ListingPropertyType,
@@ -50,6 +52,13 @@ function priceUnit(transactionType: ListingTransactionType, tail: string, hasPri
   if (/teden/i.test(tail)) return "week";
   if (/dnevn/i.test(tail)) return "day";
   return "unknown";
+}
+
+export function oglasnikPublishedAt(xml: string): Date | null {
+  const raw = load(xml, { xml: true })("pubDate").first().text().trim();
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 export function normalizeOglasnikItem(xml: string, requestedType: ListingTransactionType): NormalizedListing | null {
@@ -108,34 +117,77 @@ export function normalizeOglasnikItem(xml: string, requestedType: ListingTransac
 
 async function readOglasnikCatalogue(
   transactionType: ListingTransactionType,
-  limits: { maxPages: number; maxListings: number },
+  limits: ListingCatalogueLimits,
   fetchText: ListingFetchHtml,
 ): Promise<ListingCatalogue> {
   const found = new Map<string, NormalizedListing>();
   let pages = 0;
   let skipped = 0;
+  let fetched = 0;
+  let outsideLookback = 0;
   let completeFeed = false;
+  let endedBy404 = false;
   let capped = false;
-  while (pages < limits.maxPages && found.size < limits.maxListings) {
+  let reachedLookback = false;
+  let lookbackApplied = false;
+  while (pages < limits.maxPages && found.size < limits.maxListings && !reachedLookback) {
+    throwIfListingImportStopped(limits.signal);
     const pageUrl = new URL(feedUrl);
     if (pages > 0) pageUrl.searchParams.set("paged", String(pages + 1));
-    const xml = await fetchText({ url: pageUrl.toString(), accept: "application/rss+xml, application/xml, text/xml" }, oglasnikAdapter);
+    let xml: string;
+    try {
+      xml = await fetchText({ url: pageUrl.toString(), accept: "application/rss+xml, application/xml, text/xml" }, oglasnikAdapter);
+    } catch (error) {
+      if (isListingImportStopped(error)) throw error;
+      // WordPress returns 404 once the short property feed runs out. That is the
+      // end of the public archive, not a failed import of the pages already read.
+      if (pages > 0 && error instanceof Error && /\bHTTP 404\b/.test(error.message)) {
+        // The feed stopped. That is not proof we hold every ad, so do not mark
+        // the catalogue complete (a complete import may retire unseen rows).
+        endedBy404 = true;
+        break;
+      }
+      throw error;
+    }
     if (!/<rss[\s>]/i.test(xml) || !/<channel[\s>]/i.test(xml)) throw new Error("Oglasnik feed could not be parsed");
     const document = load(xml, { xml: true });
     const items = document("item").toArray();
     pages += 1;
     if (items.length === 0) { completeFeed = true; break; }
+    const pageListings: NormalizedListing[] = [];
     for (const element of items) {
       if (found.size >= limits.maxListings) { capped = true; break; }
-      const listing = normalizeOglasnikItem(document(element).toString(), transactionType);
+      fetched += 1;
+      const itemXml = document(element).toString();
+      const published = oglasnikPublishedAt(itemXml);
+      if (published) lookbackApplied = true;
+      if (published && limits.publishedAfter && published.getTime() < limits.publishedAfter.getTime()) {
+        outsideLookback += 1;
+        skipped += 1;
+        reachedLookback = true;
+        continue;
+      }
+      const listing = normalizeOglasnikItem(itemXml, transactionType);
       if (!listing) { skipped += 1; continue; }
+      if (!found.has(listing.sourceListingId)) pageListings.push(listing);
       found.set(listing.sourceListingId, listing);
     }
-    if (capped) break;
-    if (items.length < 10) { completeFeed = true; break; }
+    if (items.length < 10) completeFeed = true;
+    if (limits.onBatch) {
+      await limits.onBatch({
+        listings: pageListings, pages, skipped, fetched, outsideLookback, reachedLookback, lookbackApplied,
+        exhausted: completeFeed, capped,
+      });
+    }
+    if (capped || reachedLookback || completeFeed) break;
   }
+  if (pages >= limits.maxPages && !completeFeed && !reachedLookback) capped = true;
   const listings = [...found.values()];
-  return { listings, pages, skipped, complete: completeFeed && !capped && skipped === 0 && listings.length > 0 };
+  const exhausted = (completeFeed || endedBy404) && !capped;
+  return {
+    listings, pages, skipped, fetched, outsideLookback, reachedLookback, lookbackApplied, exhausted, capped,
+    complete: limits.publishedAfter === undefined && completeFeed && !capped && !reachedLookback && skipped === 0 && listings.length > 0,
+  };
 }
 
 export const oglasnikAdapter: ListingSourceAdapter = {

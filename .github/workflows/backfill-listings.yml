@@ -1,0 +1,110 @@
+name: Backfill listings
+
+# Manual history load. The five-minute refresh stays in ingest-listings.yml.
+# GitHub-hosted jobs stop at 6 hours. Keller Williams waits 30 seconds before
+# every request, so a long lookback can outlive this job. DEPLOYMENT.md has the
+# same command for a run on the VM, which is not limited by Actions.
+on:
+  workflow_dispatch:
+    inputs:
+      months:
+        description: Lookback in calendar months (1-36)
+        required: false
+        default: "3"
+      sources:
+        description: Comma-separated enabled sources (re-max, kw, oglasnik)
+        required: false
+        default: "re-max,kw,oglasnik"
+      transaction_types:
+        description: sale, rent, or sale,rent
+        required: false
+        default: "sale,rent"
+
+concurrency:
+  group: listing-ingest
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - name: Configure deployment SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.HETZNER_VM_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.HETZNER_VM_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/hetzner_deploy"
+          chmod 600 "$HOME/.ssh/hetzner_deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/hetzner_deploy" >/dev/null
+
+      - name: Backfill listing catalogues on the VM
+        env:
+          DEPLOY_HOST: ${{ secrets.HETZNER_VM_HOST }}
+          DEPLOY_USER: ${{ secrets.HETZNER_VM_USER }}
+          BACKFILL_MONTHS: ${{ inputs.months }}
+          BACKFILL_SOURCES: ${{ inputs.sources }}
+          BACKFILL_TRANSACTION_TYPES: ${{ inputs.transaction_types }}
+        run: |
+          set -eu
+          months=$(printf '%s' "$BACKFILL_MONTHS" | tr -d '[:space:]')
+          sources=$(printf '%s' "$BACKFILL_SOURCES" | tr -d '[:space:]')
+          types=$(printf '%s' "$BACKFILL_TRANSACTION_TYPES" | tr -d '[:space:]')
+          case "$months" in
+            ''|*[!0-9]*) echo "months must be an integer from 1 to 36" >&2; exit 1 ;;
+          esac
+          if [ "$months" -lt 1 ] || [ "$months" -gt 36 ]; then
+            echo "months must be an integer from 1 to 36" >&2
+            exit 1
+          fi
+          validate_list() {
+            label=$1
+            value=$2
+            allow=$3
+            rest=$value
+            seen=" "
+            if [ -z "$rest" ]; then
+              echo "$label must not be empty" >&2
+              exit 1
+            fi
+            while [ -n "$rest" ]; do
+              item=${rest%%,*}
+              case ",${allow}," in
+                *",${item},"*) ;;
+                *) echo "unsupported ${label}: ${item}" >&2; exit 1 ;;
+              esac
+              case "$seen" in
+                *" ${item} "*) echo "duplicate ${label}: ${item}" >&2; exit 1 ;;
+              esac
+              seen="${seen}${item} "
+              if [ "$rest" = "$item" ]; then rest=""; else rest=${rest#*,}; fi
+            done
+          }
+          validate_list sources "$sources" "re-max,kw,oglasnik"
+          validate_list transaction_types "$types" "sale,rent"
+          ssh -T -o ServerAliveInterval=30 -o ServerAliveCountMax=120 \
+            -i "$HOME/.ssh/hetzner_deploy" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "sh -s -- $(printf '%q' "$months") $(printf '%q' "$sources") $(printf '%q' "$types")" <<'EOF'
+          set -eu
+          months=$1
+          sources=$2
+          types=$3
+          container=$(docker ps -q \
+            --filter label=com.docker.compose.project=property-scraper \
+            --filter label=com.docker.compose.service=api)
+          count=$(printf '%s\n' "$container" | sed '/^$/d' | wc -l)
+          if [ "$count" -ne 1 ]; then
+            echo "Expected one running property-scraper api container, found ${count}" >&2
+            exit 1
+          fi
+          docker exec "$container" node dist/listings/backfill.js \
+            --months="$months" \
+            --sources="$sources" \
+            --transaction-types="$types"
+          EOF

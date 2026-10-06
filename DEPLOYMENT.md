@@ -125,6 +125,30 @@ Removing the `property-scraper-listings-refresh` line pauses the schedule
 until the next production deploy, which installs it again. A one-off refresh
 from GitHub is the **Ingest listings** workflow's "Run workflow" button.
 
+## Listing backfill
+
+Historical sale and rent ads are not loaded by the five-minute cron. After
+a deploy that contains `dist/listings/backfill.js`, run Backfill listings from
+the Actions tab (`workflow_dispatch`), or on the VM:
+
+```bash
+ssh deploy@46.224.27.216
+container=$(docker ps -q \
+  --filter label=com.docker.compose.project=property-scraper \
+  --filter label=com.docker.compose.service=api)
+docker exec "$container" node dist/listings/backfill.js \
+  --months=3 \
+  --sources=re-max,kw,oglasnik \
+  --transaction-types=sale,rent
+```
+
+The default window is 3 months. The GitHub job allows 6 hours and then stops;
+Keller Williams waits 30 seconds per request, so use the VM command when a
+window will not finish in Actions. Ctrl+C stops cleanly. Backfill takes the
+same Postgres advisory lock as `refresh-listings.sh`, so the five-minute cron
+skips while a backfill holds it. See the README for per-source archive limits.
+Bolha stays disabled.
+
 ## References
 
 - [Hetzner Docker CE image](https://docs.hetzner.com/cloud/apps/list/docker-ce/)

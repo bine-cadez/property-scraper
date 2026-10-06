@@ -36,6 +36,11 @@ export type NormalizedListing = {
 export type ListingSearchPage = {
   listingUrls: string[];
   nextPageUrl: string | null;
+  /**
+   * Catalogue-card timestamps keyed by the listing URL, when the source prints one.
+   * ISO 8601. Used to stop a backfill without assuming every source has a date filter.
+   */
+  publishedAt?: Record<string, string>;
 };
 
 export type ListingHttpRequest = {
@@ -48,11 +53,38 @@ export type ListingHttpRequest = {
 
 export type ListingFetchHtml = (request: string | ListingHttpRequest, source: ListingSourceAdapter) => Promise<string>;
 
+export type ListingCatalogueBatch = {
+  listings: NormalizedListing[];
+  pages: number;
+  skipped: number;
+  fetched: number;
+  outsideLookback: number;
+  reachedLookback: boolean;
+  lookbackApplied: boolean;
+  exhausted: boolean;
+  capped: boolean;
+};
+
+export type ListingCatalogueLimits = {
+  maxPages: number;
+  maxListings: number;
+  /** Keep ads published at or after this instant, and stop once a newest-first catalogue steps past it. */
+  publishedAfter?: Date;
+  signal?: AbortSignal;
+  onBatch?: (batch: ListingCatalogueBatch) => Promise<void>;
+};
+
 export type ListingCatalogue = {
   listings: NormalizedListing[];
   pages: number;
   skipped: number;
   complete: boolean;
+  fetched?: number;
+  outsideLookback?: number;
+  reachedLookback?: boolean;
+  lookbackApplied?: boolean;
+  exhausted?: boolean;
+  capped?: boolean;
 };
 
 export type ListingSourceAdapter = {
@@ -71,7 +103,7 @@ export type ListingSourceAdapter = {
    */
   readCatalogue?: (
     type: ListingTransactionType,
-    limits: { maxPages: number; maxListings: number },
+    limits: ListingCatalogueLimits,
     fetchText: ListingFetchHtml,
   ) => Promise<ListingCatalogue>;
 };
