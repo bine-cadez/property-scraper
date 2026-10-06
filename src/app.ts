@@ -8,10 +8,13 @@ import { gursRoutes, type GursIngest } from "./routes/gurs.js";
 import { healthRoutes } from "./routes/health.js";
 import { mapRoutes } from "./routes/map.js";
 import { readRoutes } from "./routes/read.js";
+import { listingRoutes } from "./routes/listings.js";
+import { listingIngestRoutes, type ListingsIngest } from "./routes/listing-ingest.js";
 import { registerSwagger, SWAGGER_ROUTE_PREFIX } from "./swagger.js";
 
 export type AppDependencies = {
   gursIngest?: GursIngest;
+  listingsIngest?: ListingsIngest;
 };
 
 export function buildApp(
@@ -32,6 +35,8 @@ export function buildApp(
   app.register(gursRoutes(database, dependencies.gursIngest));
   app.register(readRoutes(database));
   app.register(mapRoutes(database));
+  app.register(listingRoutes(database));
+  app.register(listingIngestRoutes(database, dependencies.listingsIngest));
 
   app.setErrorHandler((error, request, reply) => {
     request.log.error({ err: error }, "Request failed");
