@@ -219,22 +219,26 @@ that catalogue's prior inventory intact. Concurrent imports return HTTP 409.
 
 ### Five-minute refresh
 
-`.github/workflows/ingest-listings.yml` runs every five minutes (`*/5 * * * *`,
-UTC) after this workflow is on the default branch. GitHub runs scheduled
-workflows from the default branch only. The job SSHs to the production VM with
-the same secrets as deployment and executes `node dist/listings/scheduled.js`
-inside the running API container:
+The Hetzner VM refreshes listings every five minutes. `deploy/deploy.sh`
+installs a cron entry for the deployment user that runs
+`deploy/refresh-listings.sh`. The script executes
+`node dist/listings/scheduled.js` inside the running API container and appends
+the output to `/opt/property-scraper/listings-refresh.log`.
+
+`.github/workflows/ingest-listings.yml` is a manual run of that same script
+(`workflow_dispatch`), using the deployment SSH secrets:
 
 - `HETZNER_VM_SSH_KEY`
 - `HETZNER_VM_KNOWN_HOSTS`
 - `HETZNER_VM_HOST`
 - `HETZNER_VM_USER`
 
-No extra database secret is required. The container already has `DATABASE_URL`
-from `/opt/property-scraper/.env`. The compose project name must stay
-`property-scraper` and the API service name `api`, which is what
-`deploy/deploy.sh` starts. Disable the workflow from the Actions tab to stop
-the schedule. `workflow_dispatch` runs the same command once.
+GitHub scheduled workflows are best-effort, so this refresh does not use a
+GitHub Actions cron. No extra database secret is required. The container
+already has `DATABASE_URL` from `/opt/property-scraper/.env`. The compose
+project name must stay `property-scraper` and the API service name `api`.
+The next production deploy reinstalls the cron entry. Host setup, logs, and
+pausing the schedule are described in `DEPLOYMENT.md`.
 
 The scheduled pass is an incremental refresh, not a full-market crawl:
 
@@ -248,9 +252,10 @@ The scheduled pass is an incremental refresh, not a full-market crawl:
 
 Locally, the same command is `pnpm ingest:listings:scheduled`. It needs
 `DATABASE_URL` (and the listing migration). If another import holds the
-database lock, the scheduled run logs a skip and exits successfully. A failed
-catalogue still exits nonzero. The job times out after four minutes so a hung
-download does not pile onto the next slot.
+database lock, the scheduled run logs a skip and exits successfully. A second
+host run exits successfully when the refresh lock is already held. A failed
+catalogue still exits nonzero. The host script stops a hung download after
+four minutes so it does not pile onto the next slot.
 
 ```text
 GET /listings/sources

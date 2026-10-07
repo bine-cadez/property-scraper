@@ -27,9 +27,10 @@ build. For pushes to `main`, it additionally:
 
 1. Builds the production Docker image for `linux/amd64`.
 2. Publishes immutable commit and `latest` tags to GHCR.
-3. Copies the Compose/Caddy configuration to the VM over SSH.
-4. Starts the new image and waits for its authenticated `/ready` check, which
-   also verifies the Aiven connection.
+3. Copies the Compose, Caddy, and listings-refresh scripts to the VM over SSH.
+4. Installs the deployment user's five-minute listings cron entry, starts the
+   new image, and waits for its authenticated `/ready` check, which also
+   verifies the Aiven connection.
 5. Restores the previous image automatically if the new container does not
    become healthy.
 
@@ -91,6 +92,38 @@ docker compose -f compose.yaml logs --tail 100
 Large GURS ingestion runs are safest from the local machine against Aiven.
 The VM can run them, but API traffic and ingestion would share its two vCPUs
 and 4 GB RAM.
+
+## Listings refresh
+
+Each production deploy installs this cron entry for the `deploy` user, before
+the API container is replaced:
+
+```cron
+*/5 * * * * /bin/sh /opt/property-scraper/refresh-listings.sh >/dev/null 2>&1 # property-scraper-listings-refresh
+```
+
+The script runs `node dist/listings/scheduled.js` in the API container. Cron
+discards its own copy of the output. The script appends the same output to
+`/opt/property-scraper/listings-refresh.log` and prints it for SSH and for a
+manual GitHub Actions run. A second run exits successfully when the refresh
+lock is already held. A hung import is stopped after four minutes.
+
+The VM needs the `cron` package and a running cron daemon (`cron` on Ubuntu).
+`deploy/deploy.sh` stops before replacing a healthy API container when
+`crontab` is missing or the daemon is not running. Start a missing daemon
+with `sudo systemctl enable --now cron`, then deploy again.
+
+Watch or pause the schedule from the VM:
+
+```bash
+ssh deploy@46.224.27.216
+tail -f /opt/property-scraper/listings-refresh.log
+crontab -l
+```
+
+Removing the `property-scraper-listings-refresh` line pauses the schedule
+until the next production deploy, which installs it again. A one-off refresh
+from GitHub is the **Ingest listings** workflow's "Run workflow" button.
 
 ## References
 
