@@ -38,15 +38,18 @@ describe("production deployment", () => {
     const pull = deployScript.indexOf("compose pull api caddy");
     expect(install).toBeGreaterThan(-1);
     expect(pull).toBeGreaterThan(install);
+    expect(deployScript).toContain('script="/opt/property-scraper/refresh-listings.sh"');
+    expect(deployScript).toContain('marker="property-scraper-listings-refresh"');
     expect(deployScript).toContain(
-      "*/5 * * * * /bin/sh /opt/property-scraper/refresh-listings.sh >/dev/null 2>&1 # property-scraper-listings-refresh",
+      'entry="*/5 * * * * /bin/sh ${script} >/dev/null 2>&1 # ${marker}"',
     );
 
     expect(refreshScript).toContain("node dist/listings/scheduled.js");
     expect(refreshScript).toContain("label=com.docker.compose.project=property-scraper");
     expect(refreshScript).toContain("label=com.docker.compose.service=api");
     expect(refreshScript).toContain("timeout -k 15 240");
-    expect(refreshScript).toContain("/opt/property-scraper/listings-refresh.log");
+    expect(refreshScript).toContain('app_dir="/opt/property-scraper"');
+    expect(refreshScript).toContain('log_file="${app_dir}/listings-refresh.log"');
     expect(refreshScript).toContain("flock -n 9");
 
     expect(deployWorkflow).toContain("deploy/refresh-listings.sh");
