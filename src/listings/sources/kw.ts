@@ -34,6 +34,19 @@ function roomsFromUrl(url: string): number | null {
   return whole?.[1] ? Number(whole[1]) : null;
 }
 
+/** Catalogue cards print a local calendar date such as "Torek, 06.10.2026". */
+export function kwCardPublishedAt(text: string): string | null {
+  const match = text.replace(/\s+/g, " ").match(/(\d{1,2})\.(\d{1,2})\.(20\d{2})/);
+  if (!match?.[1] || !match[2] || !match[3]) return null;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return date.toISOString();
+}
+
 function priceUnit(transactionType: ListingTransactionType, priceText: string, pageText: string): ListingPriceUnit {
   const around = `${priceText} ${pageText.slice(0, 400)}`;
   if (/m\s*(?:2|²)/i.test(priceText)) return "m2";
@@ -88,7 +101,30 @@ export const kwAdapter: ListingSourceAdapter = {
       next.searchParams.set("page", String(current + 1));
       nextPageUrl = next.toString();
     }
-    return { listingUrls: [...new Set(listingUrls)], nextPageUrl };
+    const publishedAt: Record<string, string> = {};
+    for (const element of page(".pzl-item").toArray()) {
+      const card = page(element);
+      const href = card.find("a[href]").toArray().map((anchor) => page(anchor).attr("href")).find((value) => {
+        if (!value) return false;
+        try {
+          return /\/oglas\/\d+-(?:prodaja|oddaja)-/.test(new URL(value, url).pathname);
+        } catch { return false; }
+      });
+      if (!href) continue;
+      let parsed: URL;
+      try { parsed = new URL(href, url); } catch { continue; }
+      parsed.search = "";
+      parsed.hash = "";
+      if (parsed.protocol !== "https:" || parsed.hostname !== "kwslovenia.com") continue;
+      const iso = kwCardPublishedAt(card.text());
+      if (!iso || foreignPlace.test(decodeURIComponent(parsed.pathname))) continue;
+      publishedAt[parsed.toString()] = iso;
+    }
+    const uniqueUrls = [...new Set(listingUrls)];
+    for (const listingUrl of Object.keys(publishedAt)) {
+      if (!uniqueUrls.includes(listingUrl)) delete publishedAt[listingUrl];
+    }
+    return { listingUrls: uniqueUrls, nextPageUrl, ...(Object.keys(publishedAt).length ? { publishedAt } : {}) };
   },
   parseListing(html, url, requestedType) {
     const page = load(html);

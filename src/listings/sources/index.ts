@@ -20,7 +20,7 @@ export const listingSources: ListingSourceInfo[] = [
   },
   {
     key: "re-max", name: "RE/MAX Slovenia", homepage: "https://www.re-max.si", priority: 2, enabled: true,
-    note: "Public search index used by www.re-max.si (robots.txt allows /). Slovenia sale and rent ads, with price, area, place, coordinates, and photos. Street addresses are stored only when the listing marks them public.",
+    note: "Public search index used by www.re-max.si (robots.txt allows /). Slovenia sale and rent ads, with price, area, place, coordinates, and photos. Street addresses are stored only when the listing marks them public. The index is ads that are viewable now, ordered by LastUpdatedOnWeb. It is not an archive of removed ads. Backfill can page through ads last updated inside a lookback window.",
   },
   {
     key: "bolha", name: "Bolha Nepremičnine", homepage: "https://www.bolha.com", priority: 3, enabled: false,
@@ -28,11 +28,11 @@ export const listingSources: ListingSourceInfo[] = [
   },
   {
     key: "kw", name: "Keller Williams Slovenia", homepage: "https://kwslovenia.com", priority: 4, enabled: true,
-    note: "Public sale and rent catalogues at /oglasi/prodaja and /oglasi/oddaja. robots.txt allows crawling with Crawl-delay 30, and the importer waits 30 seconds between requests. Coordinates are not published on the listing page.",
+    note: "Public sale and rent catalogues at /oglasi/prodaja and /oglasi/oddaja. robots.txt allows crawling with Crawl-delay 30, and the importer waits 30 seconds between requests. Coordinates are not published on the listing page. Cards show a listing date and the catalogue is newest-first. Backfill stops once those dates are older than the lookback. There is no separate archive of ads that have left the catalogue.",
   },
   {
     key: "oglasnik", name: "Oglasnik.si", homepage: "https://oglasnik.si", priority: 5, enabled: true,
-    note: "Public WordPress RSS at /kategorija-oglasa/nepremicnine/feed/. Recent property classifieds only; price and place are read from the article text. Coordinates are not in the feed. Mixed sale and rent items keep a partial import from retiring unseen ads.",
+    note: "Public WordPress RSS at /kategorija-oglasa/nepremicnine/feed/. Recent property classifieds only; price and place are read from the article text. Coordinates are not in the feed. Mixed sale and rent items keep a partial import from retiring unseen ads. The feed does not keep a deep archive: once a further page returns HTTP 404, backfill stops. It cannot recover ads the feed no longer publishes.",
   },
   {
     key: "si21", name: "SI21 Nepremičnine", homepage: "https://nepremicnine.si21.com", priority: 6, enabled: false,

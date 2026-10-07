@@ -5,6 +5,7 @@ import type { ListingIngestOptions } from "./ingest.js";
  * RE/MAX is one search page (25 ads) per transaction type. Oglasnik is one
  * RSS page. Keller Williams is omitted: its robots.txt Crawl-delay of 30
  * seconds cannot finish a catalogue inside a five-minute slot.
+ * Older ads are a separate one-shot (`backfill.ts`), not this refresh.
  * A capped page does not retire ads that were not in that page.
  */
 export const scheduledListingIngestOptions: Required<ListingIngestOptions> = {

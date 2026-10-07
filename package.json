@@ -18,6 +18,7 @@
     "ingest:gurs": "tsx src/gurs/cli.ts",
     "ingest:listings": "tsx src/listings/cli.ts",
     "ingest:listings:scheduled": "tsx src/listings/scheduled.ts",
+    "ingest:listings:backfill": "tsx src/listings/backfill.ts",
     "migrate:generate": "node node_modules/@izumisy/kyrage/dist/main.mjs generate",
     "migrate:plan": "node node_modules/@izumisy/kyrage/dist/main.mjs apply --plan",
     "migrate:apply": "node node_modules/@izumisy/kyrage/dist/main.mjs apply && tsx src/db/migrate.ts",

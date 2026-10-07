@@ -1,6 +1,8 @@
 import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
 import { assertListingSourceUrl, createListingFetcher, ingestListings, validateListingIngestOptions } from "./ingest.js";
+import { kwAdapter } from "./sources/kw.js";
+import { ListingImportStopped } from "./stop.js";
 import type { ListingFetchHtml, ListingSourceAdapter, NormalizedListing } from "./types.js";
 import axios from "axios";
 
@@ -141,6 +143,23 @@ describe("listing import boundaries", () => {
       expect(wait).toHaveBeenCalledWith(2000);
       get.mockResolvedValueOnce({ status: 302, headers: { location: "https://localhost/private" } });
       await expect(createListingFetcher(wait)(listing.url, adapter())).rejects.toThrow("outside Bolha");
+    } finally {
+      get.mockRestore();
+    }
+  });
+
+  it("waits for a source crawl delay and stops when the signal is aborted", async () => {
+    const get = vi.spyOn(axios, "get");
+    const wait = vi.fn().mockResolvedValue(undefined);
+    try {
+      get.mockResolvedValue({ status: 200, data: "<html>ad</html>", headers: {} });
+      await createListingFetcher(wait)("https://kwslovenia.com/oglasi/prodaja", kwAdapter);
+      expect(wait).toHaveBeenCalledWith(30_000);
+      const controller = new AbortController();
+      controller.abort();
+      const abortedWait = vi.fn();
+      await expect(createListingFetcher(abortedWait, { signal: controller.signal })("https://kwslovenia.com/oglasi/prodaja", kwAdapter)).rejects.toBeInstanceOf(ListingImportStopped);
+      expect(abortedWait).not.toHaveBeenCalled();
     } finally {
       get.mockRestore();
     }

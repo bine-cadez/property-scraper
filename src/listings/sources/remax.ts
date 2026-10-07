@@ -1,7 +1,9 @@
 import { load } from "cheerio";
 import { parseAmount } from "../amount.js";
+import { throwIfListingImportStopped } from "../stop.js";
 import type {
   ListingCatalogue,
+  ListingCatalogueLimits,
   ListingFetchHtml,
   ListingLocationAccuracy,
   ListingPriceUnit,
@@ -149,9 +151,14 @@ export function normalizeRemaxListing(
   };
 }
 
+function unixSeconds(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 async function readRemaxCatalogue(
   transactionType: ListingTransactionType,
-  limits: { maxPages: number; maxListings: number },
+  limits: ListingCatalogueLimits,
   fetchText: ListingFetchHtml,
 ): Promise<ListingCatalogue> {
   const settings = object(JSON.parse(await fetchText({
@@ -167,16 +174,33 @@ async function readRemaxCatalogue(
   const found = new Map<string, NormalizedListing>();
   let pages = 0;
   let skipped = 0;
+  let fetched = 0;
+  let outsideLookback = 0;
   let skip = 0;
   let total: number | null = null;
   let capped = false;
-  while (pages < limits.maxPages && found.size < limits.maxListings) {
+  let reachedLookback = false;
+  let exhausted = false;
+  // LastUpdatedOnWeb is unix seconds on the live viewable index. There is no
+  // archive of ads that have already left the site. A lookback filters that index.
+  const publishedAfterSeconds = limits.publishedAfter ? Math.floor(limits.publishedAfter.getTime() / 1000) : null;
+  const filter = [
+    `content/TenantId eq ${tenantId}`,
+    `content/CountryID eq ${countryId}`,
+    `content/MacroRegionId eq ${regionId}`,
+    "content/OnHoldListing eq false",
+    "content/IsViewable eq true",
+    `content/TransactionTypeUID eq ${transaction}`,
+    publishedAfterSeconds === null ? null : `content/LastUpdatedOnWeb ge ${publishedAfterSeconds}`,
+  ].filter((part): part is string => part !== null).join(" and ");
+  const select = publishedAfterSeconds === null ? selectedFields : `${selectedFields},content/LastUpdatedOnWeb`;
+  while (pages < limits.maxPages && found.size < limits.maxListings && !reachedLookback) {
+    throwIfListingImportStopped(limits.signal);
     const top = Math.min(25, limits.maxListings - found.size);
     const body = {
-      count: true, skip, top,
-      filter: `content/TenantId eq ${tenantId} and content/CountryID eq ${countryId} and content/MacroRegionId eq ${regionId} and content/OnHoldListing eq false and content/IsViewable eq true and content/TransactionTypeUID eq ${transaction}`,
+      count: true, skip, top, filter,
       orderby: "content/LastUpdatedOnWeb desc, content/ListingPriceEuro asc",
-      select: selectedFields,
+      select,
     };
     const payload = object(JSON.parse(await fetchText({
       url: searchUrl, method: "POST", body: JSON.stringify(body), contentType: "application/json", accept: "application/json",
@@ -188,20 +212,43 @@ async function readRemaxCatalogue(
       throw new Error("RE/MAX search response could not be parsed");
     }
     total = count;
-    if (rows.length === 0) break;
+    if (rows.length === 0) { exhausted = true; break; }
+    const pageListings: NormalizedListing[] = [];
     for (const row of rows) {
       if (found.size >= limits.maxListings) { capped = true; break; }
+      fetched += 1;
       const content = object(object(row)?.content);
+      const updatedOnWeb = unixSeconds(content?.LastUpdatedOnWeb);
+      if (limits.publishedAfter && updatedOnWeb !== null && updatedOnWeb * 1000 < limits.publishedAfter.getTime()) {
+        outsideLookback += 1;
+        skipped += 1;
+        reachedLookback = true;
+        break;
+      }
       const listing = normalizeRemaxListing(content, transactionType, regionId);
       if (!listing) { skipped += 1; continue; }
+      if (!found.has(listing.sourceListingId)) pageListings.push(listing);
       found.set(listing.sourceListingId, listing);
     }
+    if (limits.onBatch) {
+      await limits.onBatch({
+        listings: pageListings, pages, skipped, fetched, outsideLookback, reachedLookback,
+        lookbackApplied: publishedAfterSeconds !== null, exhausted: false, capped,
+      });
+    }
+    if (reachedLookback || capped) break;
     skip += rows.length;
-    if (skip >= total) break;
+    if (skip >= total) { exhausted = true; break; }
   }
+  if (!reachedLookback && !capped && total !== null && (skip >= total || found.size >= total)) exhausted = true;
+  if (pages >= limits.maxPages && !exhausted && !reachedLookback) capped = true;
   const listings = [...found.values()];
-  const complete = total !== null && listings.length === total && !capped && skipped === 0;
-  return { listings, pages, skipped, complete };
+  // A date-bounded slice is not the whole catalogue, so it must not retire older ads.
+  const complete = publishedAfterSeconds === null && total !== null && listings.length === total && !capped && skipped === 0 && !reachedLookback;
+  return {
+    listings, pages, skipped, complete, fetched, outsideLookback, reachedLookback,
+    lookbackApplied: publishedAfterSeconds !== null, exhausted, capped,
+  };
 }
 
 export const remaxAdapter: ListingSourceAdapter = {

@@ -4,8 +4,10 @@ import type { Pool, PoolClient } from "pg";
 
 import { ApiValidationError } from "../gurs/query.js";
 import { listingFingerprint } from "./fingerprint.js";
+import { isListingImportStopped, ListingImportStopped, throwIfListingImportStopped } from "./stop.js";
 import { listingAdapters, listingSources, listingSourcesFor, splitSourceList } from "./sources/index.js";
 import type {
+  ListingCatalogueLimits,
   ListingFetchHtml,
   ListingHttpRequest,
   ListingSourceAdapter,
@@ -94,7 +96,39 @@ function requestOf(request: string | ListingHttpRequest): ListingHttpRequest {
 // never empty catalogues, so they cannot cause existing ads to be retired.
 export function createListingFetcher(
   wait: (milliseconds: number) => Promise<unknown> = delay,
+  options?: { signal?: AbortSignal },
 ): ListingFetchHtml {
+  const signal = options?.signal;
+  const pauseFor = async (milliseconds: number) => {
+    throwIfListingImportStopped(signal);
+    if (!signal) {
+      await wait(milliseconds);
+      return;
+    }
+    if (wait === delay) {
+      try {
+        await delay(milliseconds, undefined, { signal });
+      } catch (error) {
+        if (signal.aborted || isListingImportStopped(error)) throw new ListingImportStopped();
+        throw error;
+      }
+      return;
+    }
+    let onAbort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        wait(milliseconds),
+        new Promise<never>((_, reject) => {
+          onAbort = () => reject(new ListingImportStopped());
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        }),
+      ]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
+    throwIfListingImportStopped(signal);
+  };
   return async (original, source) => {
     const requested = requestOf(original);
     let url = requested.url;
@@ -102,11 +136,12 @@ export function createListingFetcher(
     let body = requested.body;
     const pause = source.minDelayMs ?? 1500;
     for (let attempt = 0; attempt < 3; attempt++) {
+      throwIfListingImportStopped(signal);
       assertListingSourceUrl(url, source);
-      await wait(pause);
+      await pauseFor(pause);
       let response;
       try {
-        const options = {
+        const requestOptions = {
           timeout: 30_000,
           responseType: "text" as const,
           maxContentLength: 10 * 1024 * 1024,
@@ -117,12 +152,15 @@ export function createListingFetcher(
             Accept: requested.accept ?? "text/html,application/json,application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
             ...(requested.contentType ? { "Content-Type": requested.contentType } : {}),
           },
+          ...(signal ? { signal } : {}),
         };
         response = method === "POST"
-          ? await axios.post<string>(url, body, options)
-          : await axios.get<string>(url, options);
+          ? await axios.post<string>(url, body, requestOptions)
+          : await axios.get<string>(url, requestOptions);
       } catch (error) {
+        if (signal?.aborted || isListingImportStopped(error)) throw new ListingImportStopped();
         if (attempt === 2) throw error;
+        throwIfListingImportStopped(signal);
         await wait(1000 * 2 ** attempt);
         continue;
       }
@@ -210,11 +248,13 @@ async function linkFingerprints(client: PoolClient, transactionType: ListingTran
   return crossSourceDuplicates;
 }
 
-async function saveListings(client: PoolClient, listings: NormalizedListing[], source: ListingSourceKey, transactionType: ListingTransactionType, complete: boolean): Promise<{ deactivated: number; crossSourceDuplicates: number }> {
+export async function saveListings(client: PoolClient, listings: NormalizedListing[], source: ListingSourceKey, transactionType: ListingTransactionType, complete: boolean): Promise<{ deactivated: number; crossSourceDuplicates: number; inserted: number; updated: number }> {
   await client.query("BEGIN");
   try {
+    let inserted = 0;
+    let updated = 0;
     for (const listing of listings) {
-      await client.query(`
+      const saved = await client.query<{ inserted: boolean }>(`
         INSERT INTO public.property_listings (
           id, source, source_listing_id, url, transaction_type, property_type,
           title, description, location_text, address, price, currency, price_unit,
@@ -233,6 +273,7 @@ async function saveListings(client: PoolClient, listings: NormalizedListing[], s
           content_fingerprint = EXCLUDED.content_fingerprint,
           duplicate_of = CASE WHEN EXCLUDED.content_fingerprint IS NULL THEN NULL ELSE public.property_listings.duplicate_of END,
           last_seen_at = CURRENT_TIMESTAMP, scraped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, active = true
+        RETURNING (first_seen_at = updated_at) AS inserted
       `, [
         `${listing.source}:${listing.transactionType}:${listing.sourceListingId}`,
         listing.source, listing.sourceListingId, listing.url, listing.transactionType,
@@ -241,6 +282,8 @@ async function saveListings(client: PoolClient, listings: NormalizedListing[], s
         listing.landAreaM2, listing.rooms, listing.latitude, listing.longitude,
         listing.locationAccuracy, JSON.stringify(listing.images), listingFingerprint(listing),
       ]);
+      if (saved.rows[0]?.inserted === true) inserted += 1;
+      else if (saved.rows[0]?.inserted === false) updated += 1;
     }
     const crossSourceDuplicates = await linkFingerprints(client, transactionType, listings);
     let deactivated = 0;
@@ -253,72 +296,158 @@ async function saveListings(client: PoolClient, listings: NormalizedListing[], s
       deactivated = result.rowCount ?? 0;
     }
     await client.query("COMMIT");
-    return { deactivated, crossSourceDuplicates };
+    return { deactivated, crossSourceDuplicates, inserted, updated };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
   }
 }
 
-async function collectCatalogue(
+export type ListingWalkResult = {
+  summary: ListingImportSummary;
+  listings: NormalizedListing[];
+  fetched: number;
+  outsideLookback: number;
+  reachedLookback: boolean;
+  lookbackApplied: boolean;
+  exhausted: boolean;
+  capped: boolean;
+};
+
+function catalogueReadLimits(source: ListingSourceAdapter, transactionType: ListingTransactionType, limits: ListingCatalogueLimits): ListingCatalogueLimits {
+  const readLimits: ListingCatalogueLimits = { maxPages: limits.maxPages, maxListings: limits.maxListings };
+  if (limits.publishedAfter) readLimits.publishedAfter = limits.publishedAfter;
+  if (limits.signal) readLimits.signal = limits.signal;
+  if (limits.onBatch) {
+    const onBatch = limits.onBatch;
+    readLimits.onBatch = async (batch) => {
+      for (const listing of batch.listings) validateListing(listing, source, transactionType);
+      await onBatch(batch);
+    };
+  }
+  return readLimits;
+}
+
+export async function collectListingCatalogue(
   source: ListingSourceAdapter,
   transactionType: ListingTransactionType,
-  limits: { maxPages: number; maxListings: number },
+  limits: ListingCatalogueLimits,
   fetchHtml: ListingFetchHtml,
-): Promise<{ summary: ListingImportSummary; listings: NormalizedListing[] }> {
+): Promise<ListingWalkResult> {
   const summary: ListingImportSummary = {
     source: source.key, transactionType, status: "success", pages: 0, saved: 0, skipped: 0,
     located: 0, complete: false, deactivated: 0, crossSourceDuplicates: 0,
   };
   const found = new Map<string, NormalizedListing>();
+  let fetched = 0;
+  let outsideLookback = 0;
+  let reachedLookback = false;
+  let lookbackApplied = false;
+  let exhausted = false;
+  let capped = false;
   try {
     if (source.readCatalogue) {
-      const catalogue = await source.readCatalogue(transactionType, limits, fetchHtml);
+      const catalogue = await source.readCatalogue(transactionType, catalogueReadLimits(source, transactionType, limits), fetchHtml);
       summary.pages = catalogue.pages;
       summary.skipped = catalogue.skipped;
+      fetched = catalogue.fetched ?? catalogue.listings.length + catalogue.skipped;
+      outsideLookback = catalogue.outsideLookback ?? 0;
+      reachedLookback = catalogue.reachedLookback === true;
+      lookbackApplied = catalogue.lookbackApplied === true;
+      exhausted = catalogue.exhausted === true;
+      capped = catalogue.capped === true;
       for (const listing of catalogue.listings) {
         validateListing(listing, source, transactionType);
         found.set(listing.sourceListingId, listing);
       }
       summary.complete = catalogue.complete && summary.skipped === 0 && found.size > 0;
+      if (limits.publishedAfter || reachedLookback) summary.complete = false;
     } else {
       let url: string | null = source.searchUrl(transactionType);
       const visitedPages = new Set<string>();
       const visitedListings = new Set<string>();
-      let capped = false;
-      while (url !== null && summary.pages < limits.maxPages) {
+      while (url !== null && summary.pages < limits.maxPages && !reachedLookback) {
+        throwIfListingImportStopped(limits.signal);
         assertListingSourceUrl(url, source);
         if (visitedPages.has(url)) throw new Error("Source pagination repeated a page");
         visitedPages.add(url);
         const page = source.parseSearchPage(await fetchHtml(url, source), url);
         summary.pages += 1;
+        const pageListings: NormalizedListing[] = [];
+        let pageOlder = false;
         for (const listingUrl of page.listingUrls) {
           if (visitedListings.has(listingUrl)) continue;
           if (visitedListings.size >= limits.maxListings) { capped = true; break; }
+          const published = page.publishedAt?.[listingUrl];
+          if (published) lookbackApplied = true;
+          if (published && limits.publishedAfter && Date.parse(published) < limits.publishedAfter.getTime()) {
+            visitedListings.add(listingUrl);
+            fetched += 1;
+            outsideLookback += 1;
+            summary.skipped += 1;
+            pageOlder = true;
+            continue;
+          }
+          if (limits.signal?.aborted) {
+            if (limits.onBatch && pageListings.length > 0) {
+              await limits.onBatch({
+                listings: pageListings, pages: summary.pages, skipped: summary.skipped, fetched,
+                outsideLookback, reachedLookback, lookbackApplied, exhausted: false, capped,
+              });
+            }
+            throw new ListingImportStopped();
+          }
           assertListingSourceUrl(listingUrl, source);
           visitedListings.add(listingUrl);
-          const listing = source.parseListing(await fetchHtml(listingUrl, source), listingUrl, transactionType);
+          fetched += 1;
+          let listing: NormalizedListing | null;
+          try {
+            listing = source.parseListing(await fetchHtml(listingUrl, source), listingUrl, transactionType);
+          } catch (error) {
+            if (!isListingImportStopped(error)) throw error;
+            if (limits.onBatch && pageListings.length > 0) {
+              await limits.onBatch({
+                listings: pageListings, pages: summary.pages, skipped: summary.skipped, fetched,
+                outsideLookback, reachedLookback, lookbackApplied, exhausted: false, capped,
+              });
+            }
+            throw error;
+          }
           if (!listing) { summary.skipped += 1; continue; }
           validateListing(listing, source, transactionType);
+          if (!found.has(listing.sourceListingId)) pageListings.push(listing);
           found.set(listing.sourceListingId, listing);
         }
+        if (pageOlder) reachedLookback = true;
+        if (summary.pages >= limits.maxPages && page.nextPageUrl !== null && !reachedLookback) capped = true;
+        if (limits.onBatch) {
+          await limits.onBatch({
+            listings: pageListings, pages: summary.pages, skipped: summary.skipped, fetched, outsideLookback,
+            reachedLookback, lookbackApplied, exhausted: page.nextPageUrl === null && !capped && !reachedLookback, capped,
+          });
+        }
         url = page.nextPageUrl;
-        if (capped) break;
+        if (capped || reachedLookback) break;
       }
+      if (summary.pages >= limits.maxPages && url !== null && !reachedLookback) capped = true;
+      exhausted = url === null && !capped && !reachedLookback;
       // Skipped ads can include foreign properties and wanted ads. Keep old
       // data whenever coverage is ambiguous rather than retire unseen ads.
+      // A lookback window is also a partial catalogue: never report it complete.
       summary.complete = url === null && !capped && summary.skipped === 0 && found.size > 0;
+      if (limits.publishedAfter || reachedLookback) summary.complete = false;
     }
     const listings = [...found.values()];
     summary.saved = listings.length;
     summary.located = listings.filter((listing) => listing.latitude !== null).length;
-    return { summary, listings };
+    return { summary, listings, fetched, outsideLookback, reachedLookback, lookbackApplied, exhausted, capped };
   } catch (error) {
+    if (isListingImportStopped(error)) throw error instanceof ListingImportStopped ? error : new ListingImportStopped();
     summary.status = "failed";
     summary.complete = false;
     summary.saved = 0;
     summary.error = error instanceof Error ? error.message : String(error);
-    return { summary, listings: [] };
+    return { summary, listings: [], fetched, outsideLookback, reachedLookback, lookbackApplied, exhausted, capped };
   }
 }
 
@@ -334,7 +463,7 @@ export async function previewListings(options: ListingIngestOptions = {}, depend
   for (const sourceKey of settings.sources) {
     const source = adapters[sourceKey]!;
     for (const transactionType of settings.transactionTypes) {
-      const collected = await collectCatalogue(source, transactionType, settings, fetchHtml);
+      const collected = await collectListingCatalogue(source, transactionType, settings, fetchHtml);
       summaries.push(collected.summary);
       listings.push(...collected.listings);
       dependencies.onProgress?.(collected.summary);
@@ -360,7 +489,7 @@ export async function ingestListings(database: Pool, options: ListingIngestOptio
     for (const sourceKey of settings.sources) {
       const source = adapters[sourceKey]!;
       for (const transactionType of settings.transactionTypes) {
-        const collected = await collectCatalogue(source, transactionType, settings, fetchHtml);
+        const collected = await collectListingCatalogue(source, transactionType, settings, fetchHtml);
         if (collected.summary.status === "success") {
           try {
             const saved = await saveListings(client, collected.listings, sourceKey, transactionType, collected.summary.complete);

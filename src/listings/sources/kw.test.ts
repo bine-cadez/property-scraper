@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { kwAdapter } from "./kw.js";
+import { kwAdapter, kwCardPublishedAt } from "./kw.js";
 
 const search = `
   <a href="https://kwslovenia.com/oglas/531526-prodaja-hisa-dvostanovanjska-podravska-maribor">house</a>
@@ -29,6 +29,23 @@ describe("Keller Williams Slovenia adapter", () => {
     const page = kwAdapter.parseSearchPage(search, kwAdapter.searchUrl("sale"));
     expect(page.listingUrls).toEqual(["https://kwslovenia.com/oglas/531526-prodaja-hisa-dvostanovanjska-podravska-maribor"]);
     expect(page.nextPageUrl).toBe("https://kwslovenia.com/oglasi/prodaja?page=2");
+    expect(page.publishedAt).toBeUndefined();
+  });
+
+  it("reads the calendar date printed on a catalogue card", () => {
+    const html = `
+      <div class="pzl-item list">
+        <a href="https://kwslovenia.com/oglas/531526-prodaja-hisa-dvostanovanjska-podravska-maribor">house</a>
+        <span>Torek, 06.10.2026</span>
+      </div>
+      <a href="https://kwslovenia.com/oglasi/prodaja?page=8">8</a>
+    `;
+    const page = kwAdapter.parseSearchPage(html, kwAdapter.searchUrl("sale"));
+    expect(page.publishedAt).toEqual({
+      "https://kwslovenia.com/oglas/531526-prodaja-hisa-dvostanovanjska-podravska-maribor": "2026-10-06T00:00:00.000Z",
+    });
+    expect(page.nextPageUrl).toBe("https://kwslovenia.com/oglasi/prodaja?page=2");
+    expect(kwCardPublishedAt("31.02.2026")).toBeNull();
   });
 
   it("reads price, net area, land, and photos from a listing page", () => {
