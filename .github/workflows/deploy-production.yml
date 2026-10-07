@@ -121,6 +121,7 @@ jobs:
             deploy/compose.yaml \
             deploy/Caddyfile \
             deploy/deploy.sh \
+            deploy/refresh-listings.sh \
             "${DEPLOY_USER}@${DEPLOY_HOST}:/opt/property-scraper/"
 
       - name: Log VM in to GitHub Container Registry
